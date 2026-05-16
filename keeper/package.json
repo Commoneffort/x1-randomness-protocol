@@ -10,7 +10,8 @@
     "start:validator": "node dist/validator-daemon.js",
     "start:keeper": "node dist/protocol-keeper.js",
     "lint": "eslint . --ext .ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "postinstall": "node scripts/patch-web3.js"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.29.0",
