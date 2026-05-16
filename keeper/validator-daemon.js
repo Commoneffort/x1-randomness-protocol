@@ -222,8 +222,10 @@ async function runOnce() {
   }
   console.log(`  Selected for EE round ${eeV4RoundId}`);
 
-  // Find EE round PDA — must exist (init'd by crank)
-  // We don't know coordinator pubkey; scan wrapper-round PDA to find eeRoundPubkey
+  // Find EE round PDA — scan EE_V4 program accounts filtered by round_id at offset 40.
+  // The EE round PDA seeds are ["round", coordinator, round_id_le8], but coordinator
+  // is whoever called init_ee_round (could be any validator or the crank). Rather than
+  // guessing, we scan EE_V4 directly for accounts whose round_id field matches.
   const [eeWrAddr] = wrapperPda(eeV4RoundId);
   const eeWrAcct   = await conn.getAccountInfo(eeWrAddr);
   if (!eeWrAcct) {
@@ -231,46 +233,23 @@ async function runOnce() {
     return;
   }
 
-  // Read coordinator from EE round wrapper: ee_v4_round_id is the round, we need
-  // to find the EE round PDA. It's stored in protocol_config if init'd by crank.
-  // We derive it: crank used payer as coordinator, so look it up via known coordinator.
-  // Since any validator may have init'd the round, we read coordinator from EE round data.
-  // The EE wrapper round was init'd by ixInitEeRound which stores the eer pubkey on-chain.
-  // Read it from the EE WrapperRound PDA (we need the eeRoundPubkey).
-  // The eeRoundPubkey = Pubkey::find_program_address(["round", coordinator, eeRoundId], EE_V4)
-  // Coordinator is stored in EE round account at offset 8-40 (from the CPI we made).
-  // But we don't have the EE round account yet without knowing the address.
-  //
-  // Solution: the wrapper round for eeV4RoundId was created by init_ee_round.
-  // We can get the EE round address by reading the EE account directly.
-  // The crank calls eeRoundPda(payerKey, eeRoundId). We'll try the most recently
-  // registered active validator (the crank) as coordinator, falling back to a scan.
-  // In practice, validators should query protocol config for the current EE round
-  // address off-chain, or the crank can publish it. For now we derive from cfgData.
-
-  // The coordinator address is in cfgData[8..40] (authority) — but that's the authority,
-  // not the coordinator. We need to find the EE round by scanning.
-  // Simplest reliable approach: query all EE V4 round accounts and find the one with
-  // matching round_id. But that requires getProgramAccounts on EE_V4.
   let eeRoundPubkey = null;
   try {
-    // Try known coordinators: registered validators
-    const allRegs = await conn.getProgramAccounts(PROGRAM_ID, {
-      filters: [{ memcmp: { offset: 0, bytes: Buffer.from([8,207,107,171,248,66,249,38]).toString("base64").replace(/\+/g,"-").replace(/\//g,"_").replace(/=/g,"") } }],
+    // round_id (u64 LE) is at offset 40 in the EE round account (after 8-byte disc + 32-byte coordinator)
+    const roundIdBytes = u64le(eeV4RoundId);
+    const roundIdBase58 = require("bs58").encode(roundIdBytes);
+    const eeAccounts = await conn.getProgramAccounts(EE_V4, {
+      filters: [
+        { dataSize: 838 },
+        { memcmp: { offset: 40, bytes: roundIdBase58 } },
+      ],
     });
-    for (const reg of allRegs) {
-      if (reg.account.data.length < 139) continue;
-      const candidatePubkey = new PublicKey(reg.account.data.slice(8, 40));
-      const [candidateEeRound] = PublicKey.findProgramAddressSync(
-        [Buffer.from("round"), candidatePubkey.toBuffer(), u64le(eeV4RoundId)], EE_V4
-      );
-      const eeAcct = await conn.getAccountInfo(candidateEeRound);
-      if (eeAcct) {
-        eeRoundPubkey = candidateEeRound;
-        break;
-      }
+    if (eeAccounts.length > 0) {
+      eeRoundPubkey = eeAccounts[0].pubkey;
     }
-  } catch (_) {}
+  } catch (e) {
+    console.log(`  EE round scan failed: ${e.message}`);
+  }
 
   if (!eeRoundPubkey) {
     console.log(`  Could not locate EE round account for round ${eeV4RoundId}`);
