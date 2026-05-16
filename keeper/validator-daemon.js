@@ -265,22 +265,6 @@ async function runOnce() {
   const voteAccount  = new PublicKey(regAcct.data.slice(40, 72));
   const stakeAccount = new PublicKey(regAcct.data.slice(72, 104));
 
-  // ── Init next EE round if needed ────────────────────────────────────────────
-  // eeV4RoundId in config only advances when init_ee_round is called. After
-  // advance_round opens a new protocol round, the daemon must open the matching
-  // EE round. Do this before any eligibility check so it always runs.
-  {
-    const nextEeId = eeV4RoundId + 1;
-    const [nextEeWrAddr] = wrapperPda(nextEeId);
-    if (!await conn.getAccountInfo(nextEeWrAddr)) {
-      console.log(`  Next EE round ${nextEeId} not initialized — calling init_ee_round as coordinator`);
-      try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status"); } catch (_) {}
-      const { ix } = ixInitEeRound(identity.publicKey, voteAccount, stakeAccount, nextEeId);
-      await send(ix, `init_ee_round(id=${nextEeId})`);
-      console.log(`  ✓ EE round ${nextEeId} opened — n=10, m=2, binding_slot=current+675`);
-    }
-  }
-
   // Check eligibility for this round
   if (!isEligible(poolEntropy, eeV4RoundId, identity.publicKey)) {
     console.log(`  Not selected for EE round ${eeV4RoundId} this cycle — waiting for next round`);
@@ -293,16 +277,10 @@ async function runOnce() {
   // is whoever called init_ee_round. We scan EE_V4 directly for accounts whose
   // round_id field matches rather than guessing the coordinator.
   const [eeWrAddr] = wrapperPda(eeV4RoundId);
-  const eeWrAcct   = await conn.getAccountInfo(eeWrAddr);
-  if (!eeWrAcct) {
-    // EE round not yet initialized — this validator calls init_ee_round
-    // (requires a registered active validator; the permissionless crank cannot do this)
+  if (!await conn.getAccountInfo(eeWrAddr)) {
+    // Current EE round not yet initialized — open it (binding slot not set yet so safe)
     console.log(`  EE round ${eeV4RoundId} not initialised — calling init_ee_round as coordinator`);
-    try {
-      await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status");
-    } catch (e) {
-      console.log(`  refresh_validator_status failed (ok if recently active): ${e.message}`);
-    }
+    try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status"); } catch (_) {}
     const { ix } = ixInitEeRound(identity.publicKey, voteAccount, stakeAccount, eeV4RoundId);
     await send(ix, `init_ee_round(id=${eeV4RoundId})`);
     console.log(`  ✓ n=10, m=2, binding_slot=current+675 (derived on-chain)`);
@@ -378,6 +356,19 @@ async function runOnce() {
           throw e;
         }
       }
+    }
+  }
+
+  // ── Init next EE round (only after binding slot — must not advance config before committing) ─
+  if (!beforeBinding) {
+    const nextEeId = eeV4RoundId + 1;
+    const [nextEeWrAddr] = wrapperPda(nextEeId);
+    if (!await conn.getAccountInfo(nextEeWrAddr)) {
+      console.log(`  Binding slot passed — opening next EE round ${nextEeId}`);
+      try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status"); } catch (_) {}
+      const { ix } = ixInitEeRound(identity.publicKey, voteAccount, stakeAccount, nextEeId);
+      await send(ix, `init_ee_round(id=${nextEeId})`);
+      console.log(`  ✓ EE round ${nextEeId} opened — n=10, m=2, binding_slot=current+675`);
     }
   }
 
