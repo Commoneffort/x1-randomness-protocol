@@ -18,6 +18,10 @@
  * commit so they survive process restarts.
  */
 
+// rpc-websockets dropped CommonClient from its main exports; @solana/web3.js
+// requires it. Inject it into the module cache before web3.js loads.
+{ const rws = require("rpc-websockets"); if (!rws.CommonClient) rws.CommonClient = require("rpc-websockets/dist/lib/client").default; }
+
 const {
   Connection, PublicKey, Keypair, SystemProgram, Transaction, TransactionInstruction,
   SYSVAR_SLOT_HASHES_PUBKEY, sendAndConfirmTransaction,
