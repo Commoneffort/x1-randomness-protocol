@@ -340,7 +340,14 @@ async function runOnce() {
   const beforeBinding = cur < bindingSlot;
 
   if (beforeBinding && !revealed) {
-    // Need to commit if we haven't yet
+    // Re-read config to catch cases where another validator advanced the round mid-cycle
+    const freshCfg = (await conn.getAccountInfo(cfgAddr)).data;
+    const freshEeId = readU64(freshCfg, 88);
+    if (freshEeId !== eeV4RoundId) {
+      console.log(`  Config advanced (EE ${eeV4RoundId} → ${freshEeId}) mid-cycle — skipping commit`);
+      return;
+    }
+
     let secrets = loadSecrets(eeV4RoundId);
     let alreadyCommitted = false;
 
@@ -350,7 +357,7 @@ async function runOnce() {
       console.log("  Generated and persisted fresh secrets");
     } else {
       console.log("  Loaded persisted secrets");
-      alreadyCommitted = true; // probably already committed, try reveal
+      alreadyCommitted = true;
     }
 
     if (!alreadyCommitted) {
@@ -364,6 +371,10 @@ async function runOnce() {
           console.log("  Already committed this round");
         } else if (e.message?.includes("NotSelectedForRound")) {
           console.log("  Selection check failed on-chain — not eligible this round");
+          clearSecrets();
+          return;
+        } else if (e.message?.includes("0x7d6") || e.message?.includes("ConstraintSeeds")) {
+          console.log("  Config advanced before commit landed — round changed mid-cycle, retrying next poll");
           clearSecrets();
           return;
         } else {
