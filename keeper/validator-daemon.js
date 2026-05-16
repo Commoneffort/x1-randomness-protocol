@@ -264,6 +264,22 @@ async function runOnce() {
   const voteAccount  = new PublicKey(regAcct.data.slice(40, 72));
   const stakeAccount = new PublicKey(regAcct.data.slice(72, 104));
 
+  // ── Init next EE round if needed ────────────────────────────────────────────
+  // eeV4RoundId in config only advances when init_ee_round is called. After
+  // advance_round opens a new protocol round, the daemon must open the matching
+  // EE round. Do this before any eligibility check so it always runs.
+  {
+    const nextEeId = eeV4RoundId + 1;
+    const [nextEeWrAddr] = wrapperPda(nextEeId);
+    if (!await conn.getAccountInfo(nextEeWrAddr)) {
+      console.log(`  Next EE round ${nextEeId} not initialized — calling init_ee_round as coordinator`);
+      try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status"); } catch (_) {}
+      const { ix } = ixInitEeRound(identity.publicKey, voteAccount, stakeAccount, nextEeId);
+      await send(ix, `init_ee_round(id=${nextEeId})`);
+      console.log(`  ✓ EE round ${nextEeId} opened — n=10, m=2, binding_slot=current+675`);
+    }
+  }
+
   // Check eligibility for this round
   if (!isEligible(poolEntropy, eeV4RoundId, identity.publicKey)) {
     console.log(`  Not selected for EE round ${eeV4RoundId} this cycle — waiting for next round`);
@@ -411,6 +427,7 @@ async function runOnce() {
       console.log("  Fees not yet distributed — will claim after distribute_fees runs");
     }
   }
+
 }
 
 // ── Registration helpers ────────────────────────────────────────────────────────
