@@ -1,0 +1,13 @@
+node_modules/
+target/
+.next/
+frontend/.next/
+frontend/node_modules/
+frontend/out/
+*.so
+*.d
+Cargo.lock
+*.env
+*.local
+/tmp/
+.DS_Store

@@ -1,0 +1,19 @@
+{
+  "name": "x1-randomness-protocol",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build:program": "anchor build",
+    "test": "anchor test",
+    "build:sdk": "cd sdk && npm run build"
+  },
+  "devDependencies": {
+    "@coral-xyz/anchor": "^0.30.1",
+    "@solana/web3.js": "^1.91.0",
+    "@types/chai": "^5.2.3",
+    "@types/mocha": "^10.0.10",
+    "chai": "^4.3.0",
+    "ts-mocha": "^10.0.0",
+    "typescript": "^5.4.0"
+  }
+}

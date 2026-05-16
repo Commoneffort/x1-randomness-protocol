@@ -1,0 +1,33 @@
+{
+  "name": "@x1/randomness-keeper",
+  "version": "1.0.0",
+  "description": "Validator daemon and protocol keeper for X1 Randomness Protocol",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev:validator": "ts-node validator-daemon.ts",
+    "dev:keeper": "ts-node protocol-keeper.ts",
+    "start:validator": "node dist/validator-daemon.js",
+    "start:keeper": "node dist/protocol-keeper.js",
+    "lint": "eslint . --ext .ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.29.0",
+    "@solana/web3.js": "^1.87.6",
+    "bs58": "^5.0.0",
+    "dotenv": "^16.3.1",
+    "winston": "^3.11.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.54.0",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.3.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

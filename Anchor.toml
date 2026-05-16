@@ -1,0 +1,21 @@
+[features]
+seeds = true
+
+[programs.localnet]
+randomness_wrapper = "BSKTJpgAGHRaSMLA88chYPKuSuD9qbesEcHYmUrBWU7R"
+
+[programs.mainnet]
+randomness_wrapper = "BSKTJpgAGHRaSMLA88chYPKuSuD9qbesEcHYmUrBWU7R"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "https://rpc.mainnet.x1.xyz"
+wallet = "~/.config/solana/x1randomness-key.json"
+
+[scripts]
+test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
+
+[test]
+startup_wait = 5000

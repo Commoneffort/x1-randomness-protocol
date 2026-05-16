@@ -1,0 +1,22 @@
+[package]
+name = "randomness-wrapper"
+version = "0.1.0"
+description = "X1 Randomness Protocol - On-demand randomness wrapper over Entropy Engine v4"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "randomness_wrapper"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+
+[dependencies]
+anchor-lang = { workspace = true }
+anchor-spl = { workspace = true }
+sha2 = { workspace = true }
