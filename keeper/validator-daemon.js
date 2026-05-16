@@ -11,6 +11,7 @@
  * once distribute_fees has run.
  *
  * Usage:
+ *   VALIDATOR_KEYPAIR=/path/to/identity.json node validator-daemon.js --register
  *   VALIDATOR_KEYPAIR=/path/to/identity.json node validator-daemon.js [--loop]
  *
  * The identity keypair is the same key registered via register_validator.
@@ -18,9 +19,11 @@
  * commit so they survive process restarts.
  */
 
-// rpc-websockets dropped CommonClient from its main exports; @solana/web3.js
-// requires it. Inject it into the module cache before web3.js loads.
-{ const rws = require("rpc-websockets"); if (!rws.CommonClient) rws.CommonClient = require("rpc-websockets/dist/lib/client").default; }
+// rpc-websockets dropped CommonClient and WebSocket from its main exports;
+// @solana/web3.js requires both. Inject into the module cache before web3.js loads.
+{ const rws = require("rpc-websockets");
+  if (!rws.CommonClient) rws.CommonClient = require("rpc-websockets/dist/lib/client").default;
+  if (!rws.WebSocket)    rws.WebSocket    = require("rpc-websockets/dist/lib/client/websocket").default; }
 
 const {
   Connection, PublicKey, Keypair, SystemProgram, Transaction, TransactionInstruction,
@@ -28,6 +31,8 @@ const {
 } = require("@solana/web3.js");
 const crypto = require("crypto");
 const fs     = require("fs");
+
+const STAKE_PROG = new PublicKey("Stake11111111111111111111111111111111111111");
 
 // ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -46,8 +51,9 @@ const identity = Keypair.fromSecretKey(
   new Uint8Array(JSON.parse(fs.readFileSync(keypairPath.replace(/^~/, process.env.HOME))))
 );
 
-const doLoop     = process.argv.includes("--loop");
-const STATE_FILE = `/tmp/vd-secrets-${identity.publicKey.toBase58().slice(0, 8)}.json`;
+const doLoop       = process.argv.includes("--loop");
+const doRegister   = process.argv.includes("--register");
+const STATE_FILE   = `/tmp/vd-secrets-${identity.publicKey.toBase58().slice(0, 8)}.json`;
 
 console.log(`Validator   : ${identity.publicKey.toBase58()}`);
 console.log(`RPC         : ${RPC}`);
@@ -247,7 +253,7 @@ async function runOnce() {
   const [regPda] = valRegPda(identity.publicKey);
   const regAcct  = await conn.getAccountInfo(regPda);
   if (!regAcct) {
-    console.log("  Not registered. Run: node run-round.js --register");
+    console.log("  Not registered. Run: VALIDATOR_KEYPAIR=<path> node validator-daemon.js --register");
     return;
   }
   const isActive = regAcct.data[137] !== 0;
@@ -407,7 +413,64 @@ async function runOnce() {
   }
 }
 
+// ── Registration helpers ────────────────────────────────────────────────────────
+
+async function getValidatorVoteAndStake(identityPubkey) {
+  const voteAccounts = await conn.getVoteAccounts("confirmed");
+  const entry = [...voteAccounts.current, ...voteAccounts.delinquent]
+    .find(v => v.nodePubkey === identityPubkey.toBase58());
+  if (!entry) throw new Error(`No vote account found for ${identityPubkey.toBase58()}`);
+
+  const stakeAccts = await conn.getParsedProgramAccounts(STAKE_PROG, {
+    filters: [{ memcmp: { offset: 124, bytes: entry.votePubkey } }],
+  });
+  if (!stakeAccts.length) throw new Error(`No delegated stake account found for ${identityPubkey.toBase58()}`);
+  stakeAccts.sort((a, b) => b.account.lamports - a.account.lamports);
+  return {
+    voteAccount:  new PublicKey(entry.votePubkey),
+    stakeAccount: stakeAccts[0].pubkey,
+    stake:        stakeAccts[0].account.lamports,
+    lastVote:     entry.lastVote,
+  };
+}
+
+function ixRegisterValidator(voteAccount, stakeAccount) {
+  const [reg] = valRegPda(identity.publicKey);
+  return new TransactionInstruction({ programId: PROGRAM_ID,
+    keys: [
+      { pubkey: reg,                     isSigner: false, isWritable: true },
+      { pubkey: identity.publicKey,      isSigner: true,  isWritable: true },
+      { pubkey: voteAccount,             isSigner: false, isWritable: false },
+      { pubkey: stakeAccount,            isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    data: disc("register_validator"),
+  });
+}
+
+async function registerValidator() {
+  console.log(`\n[register] Validator : ${identity.publicKey.toBase58()}`);
+  const [regPda] = valRegPda(identity.publicKey);
+  if (await conn.getAccountInfo(regPda)) {
+    console.log("  Already registered.");
+    return;
+  }
+  const { voteAccount, stakeAccount, stake, lastVote } = await getValidatorVoteAndStake(identity.publicKey);
+  console.log(`  Vote account  : ${voteAccount.toBase58()}`);
+  console.log(`  Stake account : ${stakeAccount.toBase58()}`);
+  console.log(`  Stake         : ${(stake / 1e9).toFixed(2)} XNT`);
+  const slot = await conn.getSlot("confirmed");
+  if (slot - lastVote > 500) throw new Error(`Vote account stale (${slot - lastVote} slots since last vote)`);
+  if (stake < 1000 * 1e9) throw new Error(`Stake too low: ${(stake / 1e9).toFixed(2)} XNT (need ≥ 1000 XNT)`);
+  await send(ixRegisterValidator(voteAccount, stakeAccount), "register_validator");
+  console.log("  ✓ Registered successfully");
+}
+
 async function main() {
+  if (doRegister) {
+    await registerValidator();
+    return;
+  }
   if (doLoop) {
     const POLL_MS = 15_000; // check every 15s
     while (true) {

@@ -26,9 +26,11 @@
  *   9. distribute_fees        — split fees to validators + insurance fund (permissionless)
  */
 
-// rpc-websockets dropped CommonClient from its main exports; @solana/web3.js
-// requires it. Inject it into the module cache before web3.js loads.
-{ const rws = require("rpc-websockets"); if (!rws.CommonClient) rws.CommonClient = require("rpc-websockets/dist/lib/client").default; }
+// rpc-websockets dropped CommonClient and WebSocket from its main exports;
+// @solana/web3.js requires both. Inject into the module cache before web3.js loads.
+{ const rws = require("rpc-websockets");
+  if (!rws.CommonClient) rws.CommonClient = require("rpc-websockets/dist/lib/client").default;
+  if (!rws.WebSocket)    rws.WebSocket    = require("rpc-websockets/dist/lib/client/websocket").default; }
 
 const {
   Connection, PublicKey, Keypair, SystemProgram, Transaction, TransactionInstruction,
