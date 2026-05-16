@@ -21,17 +21,12 @@
 
 // rpc-websockets dropped CommonClient and WebSocket from its main exports;
 // @solana/web3.js requires both. Inject into the module cache before web3.js loads.
-// Tries several paths to handle different rpc-websockets versions (7.4.x / 7.5.x).
+// CommonClient is always the parent class of Client — get it via prototype chain.
+// WebSocket factory: try internal paths first, fall back to 'ws'.
 {
   const rws = require("rpc-websockets");
   if (!rws.CommonClient) {
-    const candidates = [
-      "rpc-websockets/dist/lib/client",
-      "rpc-websockets/dist/lib/client.js",
-    ];
-    for (const p of candidates) {
-      try { const m = require(p); rws.CommonClient = m.default || m; if (rws.CommonClient) break; } catch (_) {}
-    }
+    rws.CommonClient = Object.getPrototypeOf(rws.Client);
   }
   if (!rws.WebSocket) {
     const candidates = [
