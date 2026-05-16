@@ -323,13 +323,17 @@ async function runOnce() {
     return;
   }
 
-  // Read binding_slot from EE round account
+  // Read slot fields from EE round account (see entropy_engine IDL Round struct):
+  //   off 50: commit_deadline — commits must arrive before this slot
+  //   off 58: reveal_deadline — reveals must arrive before this slot
+  //   off 66: binding_slot    — finalize_via_ee allowed after this slot
   const eeAcct = await conn.getAccountInfo(eeRoundPubkey);
   if (!eeAcct || eeAcct.data.length < 74) {
     console.log("  EE round account too small / unreadable");
     return;
   }
-  const bindingSlot = Number(eeAcct.data.readBigUInt64LE(66));
+  const commitDeadline = Number(eeAcct.data.readBigUInt64LE(50));
+  const bindingSlot    = Number(eeAcct.data.readBigUInt64LE(66));
 
   // ── Commit phase ────────────────────────────────────────────────────────────
   const [vrAddr] = vrPda(eeRoundPubkey, identity.publicKey);
@@ -337,9 +341,10 @@ async function runOnce() {
   const revealed = !!vrAcct;
 
   const cur = await conn.getSlot("confirmed");
-  const beforeBinding = cur < bindingSlot;
+  const beforeCommitDeadline = cur < commitDeadline;
+  const pastBinding          = cur >= bindingSlot;
 
-  if (beforeBinding && !revealed) {
+  if (beforeCommitDeadline && !revealed) {
     // Re-read config to catch cases where another validator advanced the round mid-cycle
     const freshCfg = (await conn.getAccountInfo(cfgAddr)).data;
     const freshEeId = readU64(freshCfg, 88);
@@ -384,21 +389,28 @@ async function runOnce() {
     }
   }
 
-  // ── Init next EE round (only after binding slot — must not advance config before committing) ─
-  if (!beforeBinding) {
-    const nextEeId = eeV4RoundId + 1;
-    const [nextEeWrAddr] = wrapperPda(nextEeId);
-    if (!await conn.getAccountInfo(nextEeWrAddr)) {
-      console.log(`  Binding slot passed — opening next EE round ${nextEeId}`);
-      try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status"); } catch (_) {}
-      const { ix } = ixInitEeRound(identity.publicKey, voteAccount, stakeAccount, nextEeId);
-      await send(ix, `init_ee_round(id=${nextEeId})`);
-      console.log(`  ✓ EE round ${nextEeId} opened — n=10, m=2, binding_slot=current+675`);
+  // ── Init next EE round (only after current round is finalized/cancelled) ────
+  // Must not advance config.ee_v4_round_id before the crank calls finalize_via_ee,
+  // because finalize_via_ee validates wrapper_round against the current config value.
+  if (pastBinding) {
+    const eeStatus = eeAcct.data[140]; // 0=Open, 2=Finalized, 3=Cancelled
+    if (eeStatus === 2 || eeStatus === 3) {
+      const nextEeId = eeV4RoundId + 1;
+      const [nextEeWrAddr] = wrapperPda(nextEeId);
+      if (!await conn.getAccountInfo(nextEeWrAddr)) {
+        console.log(`  EE round ${eeV4RoundId} done (status=${eeStatus}) — opening next EE round ${nextEeId}`);
+        try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status"); } catch (_) {}
+        const { ix } = ixInitEeRound(identity.publicKey, voteAccount, stakeAccount, nextEeId);
+        await send(ix, `init_ee_round(id=${nextEeId})`);
+        console.log(`  ✓ EE round ${nextEeId} opened — n=10, m=2, binding_slot=current+675`);
+      }
+    } else {
+      console.log(`  EE round ${eeV4RoundId} status=${eeStatus} — waiting for finalization before opening next round`);
     }
   }
 
   // ── Reveal phase ────────────────────────────────────────────────────────────
-  if (!beforeBinding && !revealed) {
+  if (!beforeCommitDeadline && !revealed) {
     const secrets = loadSecrets(eeV4RoundId);
     if (!secrets) {
       console.log("  Past binding slot but no secrets found — missed reveal window");

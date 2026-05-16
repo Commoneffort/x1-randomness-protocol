@@ -1359,7 +1359,7 @@ pub mod randomness_wrapper {
 
     /// Initialize an EE V4 round via CPI.
     /// Only registered active validators may open a round.
-    /// n_contributors must be >= MIN_COMMITTEE_SIZE (3).
+    /// n_contributors = MIN_EE_M_THRESHOLD so the round fills as soon as the quorum commits.
     pub fn init_ee_round(
         ctx: Context<InitEeRound>,
         ee_round_id: u64,
@@ -1369,8 +1369,11 @@ pub mod randomness_wrapper {
             RandomnessError::Unauthorized
         );
 
-        // n, m, and binding_slot are protocol constants — not caller-controlled.
-        let n_contributors: u8 = MAX_COMMITTEE_SIZE;
+        // n = m so the round fills as soon as m validators commit, enabling RevealPhase.
+        // MAX_COMMITTEE_SIZE (10) requires all 10 slots filled before RevealPhase — with
+        // fewer than 10 active validators the round would never progress. Using n = m
+        // means the minimum quorum also fills the commit slots.
+        let n_contributors: u8 = MIN_EE_M_THRESHOLD;
         let m_threshold:    u8 = MIN_EE_M_THRESHOLD;
         let current_slot       = Clock::get()?.slot;
         let binding_slot: u64  = current_slot.saturating_add(EE_V4_MIN_BINDING_SLOTS);

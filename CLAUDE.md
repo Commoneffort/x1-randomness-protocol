@@ -61,11 +61,17 @@ The protocol has **no manager, no keeper authority, and no validator selection c
 advance_round          — any signer, when MIN_SLOTS_BETWEEN_ROUNDS elapsed
 create_fee_escrow      — any signer, for valid round
 init_ee_round          — any registered active validator (first wins, pays rent as coordinator)
-                         n=MAX_COMMITTEE_SIZE(10), m=MIN_EE_M_THRESHOLD(2),
+                         n=MIN_EE_M_THRESHOLD(2), m=MIN_EE_M_THRESHOLD(2),
                          binding_slot=current+EE_V4_MIN_BINDING_SLOTS(675) — derived on-chain
+                         NOTE: n was changed from MAX_COMMITTEE_SIZE(10) to MIN_EE_M_THRESHOLD(2)
+                         because the EE program requires ALL n validators to commit before
+                         transitioning to RevealPhase. With n=10 and <10 validators, rounds
+                         can never complete. n=m=2 means both validators fill the round.
 commit_via_ee          — any eligible validator (eligibility derived from entropy, not caller choice)
-reveal_via_ee          — validators who committed
-finalize_via_ee        — any signer, after binding_slot
+                         must commit BEFORE commit_deadline (EE round offset 50)
+reveal_via_ee          — validators who committed; must reveal AFTER commit_deadline (offset 50)
+                         and BEFORE reveal_deadline (offset 58). reveal_deadline ≠ binding_slot!
+finalize_via_ee        — any signer, AFTER binding_slot (offset 66, not reveal_deadline)
 aggregate_from_ee      — any signer, after finalization
 distribute_fees        — any signer, after aggregation
 claim_validator_reward — each validator claims their own share independently
@@ -92,6 +98,24 @@ eligible    = selector < COMMIT_SELECTION_THRESHOLD
 | `validator-daemon.js` | Own identity key only | Each validator runs independently. Monitors chain, commits, reveals, claims rewards. |
 
 The crank has no special power — any node can replace it. Stopping the crank delays round advancement but cannot corrupt randomness.
+
+**Running the daemons:**
+```bash
+# Crank (one instance anywhere):
+CRANK_KEYPAIR=~/.config/solana/x1randomness-key.json nohup node run-round.js --loop > /tmp/crank.log 2>&1 &
+
+# Validator daemon (one per validator, uses identity key):
+VALIDATOR_KEYPAIR=~/.config/solana/identity.json nohup node validator-daemon.js --loop > /tmp/validator-daemon.log 2>&1 &
+
+# First-time validator registration:
+VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --register
+```
+
+**Registered validators:**
+- `8byEUEZ2sMfP6RPX9VD8JCvCQK3F5FG2LytcR9TkVWag` — owlx1, nbb2cbe (`~/.config/solana/identity.json`)
+- `9oa7NAscCZ1kCQFZJng9gfwvDzrEvyWgx4F244PHmHPH` — xen_cat, nbb2cbe (`~/.config/solana/identity.json`)
+
+**init_ee_round responsibility**: The validator daemon calls `init_ee_round` (NOT the crank). The daemon gates this call on the current EE round being Finalized (status=2) or Cancelled (status=3) — it will NOT advance to the next EE round while the current one is still in progress. The crank polls for the EE WrapperRound PDA in step 3 and waits for a validator daemon to create it.
 
 ## Security constraints (added V2.2 — do not remove)
 
@@ -227,11 +251,36 @@ Seeds: `[b"validator-reveal", ee_round.key(), contributor.key()]`
 
 ### EE V4 Round (838 bytes, cross-program read)
 
-| Offset | Field |
-|--------|-------|
-| 75 | `reveal_count` (u8) — used by `claim_validator_reward` to compute per-validator share |
-| 108–139 | `entropy_output` ([u8; 32]) |
-| 140 | `status` (Finalized = 2, Cancelled = 3) |
+Full field layout (Borsh/Anchor, no padding):
+
+| Offset | Field | Notes |
+|--------|-------|-------|
+| 8–39 | `coordinator` (Pubkey) | validator who called init_ee_round |
+| 40–47 | `round_id` (u64) | |
+| 48 | `n_contributors` (u8) | currently 2 (= MIN_EE_M_THRESHOLD) |
+| 49 | `m_threshold` (u8) | currently 2 |
+| 50–57 | `commit_deadline` (u64) | last slot for commits; init_slot + COMMIT_DEADLINE_SLOTS(200) |
+| 58–65 | `reveal_deadline` (u64) | last slot for reveals; commit_deadline + REVEAL_DEADLINE_SLOTS(400) |
+| 66–73 | `binding_slot` (u64) | slot for finalize_via_ee; passed by wrapper at init |
+| 74 | `commit_count` (u8) | |
+| 75 | `reveal_count` (u8) | used by `claim_validator_reward` to compute per-validator share |
+| 76–107 | `entropy_accumulator` ([u8; 32]) | |
+| 108–139 | `entropy_output` ([u8; 32]) | |
+| 140 | `status` (u8) | 0=CommitPhase, 1=RevealPhase, 2=Finalized, 3=Cancelled |
+| 141–148 | `slash_pool` (u64) | |
+| 149–156 | `finalized_slot` (u64) | |
+| 157 | `bump` (u8) | |
+| 158+ | `contributors` ([ContributorEntry; 10]) | each entry = 68 bytes |
+
+**Critical timing**: commit window ends at `commit_deadline` (off 50). Reveal window is `commit_deadline → reveal_deadline` (off 50–58). `binding_slot` (off 66) is ~75 slots after `reveal_deadline` and gates `finalize_via_ee`. The daemon must use `commit_deadline` (not `binding_slot`) to determine when to switch from commit to reveal phase.
+
+**Phase transition**: status transitions from CommitPhase→RevealPhase only when `commit_count == n_contributors`. With n=2, both registered validators must commit. If the reveal window expires without enough reveals, call `cancel_round` on the EE program directly (coordinator must sign + pass committed contributor wallets as remaining_accounts).
+
+**cancel_round** (EE program direct call, not via wrapper):
+- Required when: status=CommitPhase (0) and round is stuck (reveal window passed, not enough commits)
+- Signer: round coordinator (validator who called init_ee_round)  
+- remaining_accounts: committed contributor wallets in order (for stake refund)
+- Script: `/tmp/cancel-ee-round.js`
 
 ## Fee economics
 
