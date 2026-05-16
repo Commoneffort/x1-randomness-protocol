@@ -17,8 +17,7 @@
  * Round lifecycle managed here:
  *   1. advance_round          — opens new protocol round (permissionless)
  *   2. create_fee_escrow      — creates fee bucket for the round (permissionless)
- *   3. init_ee_round          — opens EE V4 round; payer is coordinator (pays rent only)
- *                               n=10, m=2, binding_slot derived on-chain from constants
+ *   3. [wait for a registered validator to call init_ee_round via validator-daemon]
  *   4. [validators commit independently via validator-daemon]
  *   5. [wait for binding_slot]
  *   6. [validators reveal independently via validator-daemon]
@@ -307,28 +306,39 @@ async function runRound() {
     console.log(`  ↳ Already exists`);
   }
 
-  // ── Step 3: Init EE round (crank is coordinator — pays rent, no special power)
-  console.log(`\n[3] Init EE round ${nextEeId}`);
+  // ── Step 3: Wait for a validator daemon to call init_ee_round ───────────────
+  // init_ee_round requires a registered active validator as coordinator.
+  // The crank holds no validator keys, so it just waits for any daemon to open
+  // the EE round, then scans EE_V4 accounts to locate the resulting PDA.
+  console.log(`\n[3] Waiting for validator daemon to init EE round ${nextEeId}…`);
+  console.log(`    (Any registered validator running validator-daemon.js will call init_ee_round)`);
   const [eeWrAddr] = wrapperPda(nextEeId);
   let eeRoundPubkey = null;
 
-  if (!await conn.getAccountInfo(eeWrAddr)) {
-    const payerAccts = await getRegisteredAccounts(payer.publicKey);
-    // Refresh crank validator status before opening round
-    await send(
-      ixRefreshValidatorStatus(payer.publicKey, payerAccts.voteAccount, payerAccts.stakeAccount),
-      [payer], "refresh_validator_status(crank)"
-    );
-    const { ix, eeRoundPubkey: eer } = ixInitEeRound(
-      payer.publicKey, payerAccts.voteAccount, payerAccts.stakeAccount, nextEeId
-    );
-    eeRoundPubkey = eer;
-    await send(ix, [payer], `init_ee_round(id=${nextEeId})`);
-    console.log(`  ✓ n=10, m=2, binding_slot=current+675 (derived on-chain)`);
-  } else {
-    const [eer] = eeRoundPda(payer.publicKey, nextEeId);
-    eeRoundPubkey = eer;
-    console.log(`  ↳ EE round ${nextEeId} already exists`);
+  {
+    let waited = false;
+    while (!await conn.getAccountInfo(eeWrAddr)) {
+      if (!waited) { process.stdout.write("  Polling"); waited = true; }
+      process.stdout.write(".");
+      await new Promise(r => setTimeout(r, 5000));
+    }
+    if (waited) console.log();
+    console.log(`  ↳ EE round ${nextEeId} initialized by a validator daemon`);
+  }
+
+  // Scan EE_V4 accounts to find the actual EE round pubkey (coordinator unknown)
+  {
+    const bs58 = require("bs58");
+    const roundIdBase58 = bs58.encode(u64le(nextEeId));
+    const eeAccounts = await conn.getProgramAccounts(EE_V4, {
+      filters: [
+        { dataSize: 838 },
+        { memcmp: { offset: 40, bytes: roundIdBase58 } },
+      ],
+    });
+    if (!eeAccounts.length) throw new Error(`Could not locate EE round account for id=${nextEeId}`);
+    eeRoundPubkey = eeAccounts[0].pubkey;
+    console.log(`  EE round account: ${eeRoundPubkey.toBase58().slice(0, 12)}…`);
   }
 
   // ── Step 4: Read binding_slot from EE round account ───────────────────────

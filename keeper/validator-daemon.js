@@ -165,6 +165,45 @@ function ixReveal(eeRoundId, eeRound, secret, nonce) {
   });
 }
 
+// init_ee_round: validator is the coordinator — pays rent for the EE round PDA
+// but has no special authority over the round outcome. n/m/binding_slot are
+// protocol constants derived on-chain.
+function ixInitEeRound(coordinatorKey, coordinatorVote, coordinatorStake, eeRoundId) {
+  const [cfg] = cfgPda();
+  const [wr]  = wrapperPda(eeRoundId);
+  const [eer] = eeRoundPda(coordinatorKey, eeRoundId);
+  const [reg] = valRegPda(coordinatorKey);
+  return {
+    ix: new TransactionInstruction({ programId: PROGRAM_ID,
+      keys: [
+        { pubkey: cfg,                     isSigner: false, isWritable: true },
+        { pubkey: wr,                      isSigner: false, isWritable: true },
+        { pubkey: eer,                     isSigner: false, isWritable: true },
+        { pubkey: coordinatorKey,          isSigner: true,  isWritable: true },
+        { pubkey: reg,                     isSigner: false, isWritable: false },
+        { pubkey: coordinatorVote,         isSigner: false, isWritable: false },
+        { pubkey: coordinatorStake,        isSigner: false, isWritable: false },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+        { pubkey: EE_V4,                   isSigner: false, isWritable: false },
+      ],
+      data: Buffer.concat([disc("init_ee_round"), u64le(eeRoundId)]),
+    }),
+    eeRoundPubkey: eer,
+  };
+}
+
+function ixRefreshValidatorStatus(voteAccount, stakeAccount) {
+  const [reg] = valRegPda(identity.publicKey);
+  return new TransactionInstruction({ programId: PROGRAM_ID,
+    keys: [
+      { pubkey: reg,          isSigner: false, isWritable: true },
+      { pubkey: voteAccount,  isSigner: false, isWritable: false },
+      { pubkey: stakeAccount, isSigner: false, isWritable: false },
+    ],
+    data: disc("refresh_validator_status"),
+  });
+}
+
 function ixClaimReward(eeRound, protocolRound, insuranceFund) {
   const [cfg]    = cfgPda();
   const [escrow] = escrowPda(protocolRound);
@@ -224,13 +263,22 @@ async function runOnce() {
 
   // Find EE round PDA — scan EE_V4 program accounts filtered by round_id at offset 40.
   // The EE round PDA seeds are ["round", coordinator, round_id_le8], but coordinator
-  // is whoever called init_ee_round (could be any validator or the crank). Rather than
-  // guessing, we scan EE_V4 directly for accounts whose round_id field matches.
+  // is whoever called init_ee_round. We scan EE_V4 directly for accounts whose
+  // round_id field matches rather than guessing the coordinator.
   const [eeWrAddr] = wrapperPda(eeV4RoundId);
   const eeWrAcct   = await conn.getAccountInfo(eeWrAddr);
   if (!eeWrAcct) {
-    console.log(`  EE round ${eeV4RoundId} not initialised yet — waiting for crank`);
-    return;
+    // EE round not yet initialized — this validator calls init_ee_round
+    // (requires a registered active validator; the permissionless crank cannot do this)
+    console.log(`  EE round ${eeV4RoundId} not initialised — calling init_ee_round as coordinator`);
+    try {
+      await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status");
+    } catch (e) {
+      console.log(`  refresh_validator_status failed (ok if recently active): ${e.message}`);
+    }
+    const { ix } = ixInitEeRound(identity.publicKey, voteAccount, stakeAccount, eeV4RoundId);
+    await send(ix, `init_ee_round(id=${eeV4RoundId})`);
+    console.log(`  ✓ n=10, m=2, binding_slot=current+675 (derived on-chain)`);
   }
 
   let eeRoundPubkey = null;
