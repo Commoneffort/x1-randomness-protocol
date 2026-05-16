@@ -28,10 +28,29 @@
 
 // rpc-websockets dropped CommonClient and WebSocket from its main exports;
 // @solana/web3.js requires both. Inject into the module cache before web3.js loads.
-// Use `m.default || m` to handle both CJS (module.exports=X) and ESM-transpiled (exports.default=X) builds.
-{ const rws = require("rpc-websockets");
-  if (!rws.CommonClient) { const m = require("rpc-websockets/dist/lib/client");   rws.CommonClient = m.default || m; }
-  if (!rws.WebSocket)    { const m = require("rpc-websockets/dist/lib/client/websocket"); rws.WebSocket = m.default || m; } }
+// Tries several paths to handle different rpc-websockets versions (7.4.x / 7.5.x).
+{
+  const rws = require("rpc-websockets");
+  if (!rws.CommonClient) {
+    const candidates = [
+      "rpc-websockets/dist/lib/client",
+      "rpc-websockets/dist/lib/client.js",
+    ];
+    for (const p of candidates) {
+      try { const m = require(p); rws.CommonClient = m.default || m; if (rws.CommonClient) break; } catch (_) {}
+    }
+  }
+  if (!rws.WebSocket) {
+    const candidates = [
+      "rpc-websockets/dist/lib/client/websocket",
+      "rpc-websockets/dist/lib/client/websocket.js",
+      "ws",
+    ];
+    for (const p of candidates) {
+      try { const m = require(p); rws.WebSocket = m.default || m; if (rws.WebSocket) break; } catch (_) {}
+    }
+  }
+}
 
 const {
   Connection, PublicKey, Keypair, SystemProgram, Transaction, TransactionInstruction,
