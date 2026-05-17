@@ -389,12 +389,21 @@ async function runOnce() {
     }
   }
 
-  // ── Init next EE round (only after current round is finalized/cancelled) ────
-  // Must not advance config.ee_v4_round_id before the crank calls finalize_via_ee,
-  // because finalize_via_ee validates wrapper_round against the current config value.
+  // ── Init next EE round ───────────────────────────────────────────────────────
+  // Open the next EE round when the current one is done. "Done" means:
+  //   - Finalized (status=2) or Cancelled (status=3), OR
+  //   - Stuck in RevealPhase (status=1) with binding slot hash expired — the EE
+  //     program's finalize requires the binding slot hash from SlotHashes sysvar
+  //     which only holds ~512 entries. If cur > binding_slot + 512, finalization
+  //     is permanently impossible and we must abandon the round.
   if (pastBinding) {
-    const eeStatus = eeAcct.data[140]; // 0=Open, 2=Finalized, 3=Cancelled
-    if (eeStatus === 2 || eeStatus === 3) {
+    const eeStatus = eeAcct.data[140]; // 0=CommitPhase, 1=RevealPhase, 2=Finalized, 3=Cancelled
+    const slotHashExpired = cur > bindingSlot + 512;
+    const roundDone = eeStatus === 2 || eeStatus === 3 || (eeStatus === 1 && slotHashExpired);
+    if (roundDone) {
+      if (eeStatus === 1 && slotHashExpired) {
+        console.log(`  EE round ${eeV4RoundId} stuck in RevealPhase — binding slot hash expired, abandoning`);
+      }
       const nextEeId = eeV4RoundId + 1;
       const [nextEeWrAddr] = wrapperPda(nextEeId);
       if (!await conn.getAccountInfo(nextEeWrAddr)) {
@@ -402,7 +411,7 @@ async function runOnce() {
         try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status"); } catch (_) {}
         const { ix } = ixInitEeRound(identity.publicKey, voteAccount, stakeAccount, nextEeId);
         await send(ix, `init_ee_round(id=${nextEeId})`);
-        console.log(`  ✓ EE round ${nextEeId} opened — n=10, m=2, binding_slot=current+675`);
+        console.log(`  ✓ EE round ${nextEeId} opened — n=2, m=2, binding_slot=current+675`);
       }
     } else {
       console.log(`  EE round ${eeV4RoundId} status=${eeStatus} — waiting for finalization before opening next round`);

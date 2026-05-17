@@ -285,13 +285,17 @@ async function runRound() {
   const eeV4RoundId    = readU64(cfgData, 88);
   const insuranceFund  = new PublicKey(cfgData.slice(40, 72));
   const nextRound      = currentRound + 1;
+  // Validators call init_ee_round, so eeV4RoundId is the round THEY just opened.
+  // The crank's job is to finalize eeV4RoundId, then wait for validators to open
+  // eeV4RoundId+1 for the next protocol round. Use eeV4RoundId (not +1) for steps 3-6.
+  const thisEeId       = eeV4RoundId;
   const nextEeId       = eeV4RoundId + 1;
 
   const bal = await conn.getBalance(payer.publicKey);
   console.log(`\nCrank key   : ${payer.publicKey.toBase58()}`);
   console.log(`Balance     : ${(bal / LAMPORTS_PER_SOL).toFixed(4)} XNT`);
   console.log(`Protocol    : round ${currentRound} → ${nextRound}`);
-  console.log(`EE V4       : round ${eeV4RoundId} → ${nextEeId}`);
+  console.log(`EE V4       : finalizing ${thisEeId}, next will be ${nextEeId}`);
   console.log(`Insurance   : ${insuranceFund.toBase58().slice(0, 12)}…\n`);
 
   // ── Optional: register crank key as validator ──────────────────────────────
@@ -327,13 +331,12 @@ async function runRound() {
     console.log(`  ↳ Already exists`);
   }
 
-  // ── Step 3: Wait for a validator daemon to call init_ee_round ───────────────
-  // init_ee_round requires a registered active validator as coordinator.
-  // The crank holds no validator keys, so it just waits for any daemon to open
-  // the EE round, then scans EE_V4 accounts to locate the resulting PDA.
-  console.log(`\n[3] Waiting for validator daemon to init EE round ${nextEeId}…`);
+  // ── Step 3: Wait for thisEeId WrapperRound (already created by a validator daemon) ──
+  // Validators call init_ee_round independently. eeV4RoundId is the round they just
+  // opened. The crank waits for that WrapperRound PDA then finalizes it.
+  console.log(`\n[3] Waiting for validator daemon to init EE round ${thisEeId}…`);
   console.log(`    (Any registered validator running validator-daemon.js will call init_ee_round)`);
-  const [eeWrAddr] = wrapperPda(nextEeId);
+  const [eeWrAddr] = wrapperPda(thisEeId);
   let eeRoundPubkey = null;
 
   {
@@ -344,20 +347,20 @@ async function runRound() {
       await new Promise(r => setTimeout(r, 5000));
     }
     if (waited) console.log();
-    console.log(`  ↳ EE round ${nextEeId} initialized by a validator daemon`);
+    console.log(`  ↳ EE round ${thisEeId} initialized by a validator daemon`);
   }
 
   // Scan EE_V4 accounts to find the actual EE round pubkey (coordinator unknown)
   {
     const bs58 = require("bs58");
-    const roundIdBase58 = bs58.encode(u64le(nextEeId));
+    const roundIdBase58 = bs58.encode(u64le(thisEeId));
     const eeAccounts = await conn.getProgramAccounts(EE_V4, {
       filters: [
         { dataSize: 838 },
         { memcmp: { offset: 40, bytes: roundIdBase58 } },
       ],
     });
-    if (!eeAccounts.length) throw new Error(`Could not locate EE round account for id=${nextEeId}`);
+    if (!eeAccounts.length) throw new Error(`Could not locate EE round account for id=${thisEeId}`);
     eeRoundPubkey = eeAccounts[0].pubkey;
     console.log(`  EE round account: ${eeRoundPubkey.toBase58().slice(0, 12)}…`);
   }
@@ -393,10 +396,10 @@ async function runRound() {
   }
 
   // ── Step 6: Finalize ───────────────────────────────────────────────────────
-  console.log(`\n[6] finalize_via_ee (EE round ${nextEeId})`);
+  console.log(`\n[6] finalize_via_ee (EE round ${thisEeId})`);
   for (let attempt = 0; attempt < 60; attempt++) {
     try {
-      await send(ixFinalizeViaEe(nextEeId, eeRoundPubkey), [payer], "finalize_via_ee");
+      await send(ixFinalizeViaEe(thisEeId, eeRoundPubkey), [payer], "finalize_via_ee");
       break;
     } catch (e) {
       if (e.message?.includes("0x177d") || e.message?.includes("BindingSlot")) {
