@@ -101,8 +101,11 @@ The crank has no special power — any node can replace it. Stopping the crank d
 
 **Running the daemons:**
 ```bash
-# Crank (one instance anywhere):
+# Crank — owlx1 server (uses deploy key):
 CRANK_KEYPAIR=~/.config/solana/x1randomness-key.json nohup node run-round.js --loop > /tmp/crank.log 2>&1 &
+
+# Crank — xen_cat server (uses identity key, redundant):
+CRANK_KEYPAIR=~/.config/solana/identity.json nohup node run-round.js --loop > /tmp/crank.log 2>&1 &
 
 # Validator daemon (one per validator, uses identity key):
 VALIDATOR_KEYPAIR=~/.config/solana/identity.json nohup node validator-daemon.js --loop > /tmp/validator-daemon.log 2>&1 &
@@ -110,6 +113,8 @@ VALIDATOR_KEYPAIR=~/.config/solana/identity.json nohup node validator-daemon.js 
 # First-time validator registration:
 VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --register
 ```
+
+**Idle gate (V4.3):** Both the crank and validator daemon check before opening any new EE round: if the entropy pool is warm (< 1 500 slots stale) AND there are no unfulfilled `RequestState` accounts on-chain, they idle and re-poll without sending any transactions. A round starts automatically when a queued request appears or the pool goes stale. Running both processes costs nothing when the protocol is idle.
 
 **Registered validators:**
 - `8byEUEZ2sMfP6RPX9VD8JCvCQK3F5FG2LytcR9TkVWag` — owlx1, nbb2cbe (`~/.config/solana/identity.json`)
