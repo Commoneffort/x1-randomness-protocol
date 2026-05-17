@@ -341,7 +341,7 @@ export default function ValidatorsPage() {
           {[
             { step: "1", title: "Register", desc: `Call register_validator with your vote account and a stake account delegated to it. The program verifies ≥${MIN_VALIDATOR_STAKE_XNT.toLocaleString()} XNT stake and that you voted within ${VALIDATOR_MAX_INACTIVE_SLOTS} slots. No whitelist — fully permissionless.` },
             { step: "2", title: "Run validator-daemon.js", desc: `Each validator runs their own daemon independently. It monitors the chain, checks your on-chain entropy-based eligibility each round, and calls commit_via_ee (SHA256(secret ‖ nonce ‖ pubkey), stakes ${EE_V4_STAKE_LAMPORTS / 1e9} XNT, returned on reveal). At least ${MIN_COMMITTEE_SIZE} validators must commit each round.` },
-            { step: "3", title: "Reveal before binding_slot", desc: "Submit your preimage before the round deadline (~4.2 min). Stake returns immediately. A ValidatorReveal PDA is written recording your contribution. Miss the deadline and you forfeit the stake." },
+            { step: "3", title: "Reveal before reveal_deadline", desc: "After commit_deadline (~200 slots / ~75s), submit your preimage before reveal_deadline (~600 slots / ~3.75 min from round init). Stake returns immediately. A ValidatorReveal PDA is written recording your contribution. Miss the deadline and you forfeit the stake." },
             { step: "4", title: "Claim reward", desc: `After finalize + distribute_fees, call claim_validator_reward once per round. Pays: round_fees × ${FEE_VALIDATORS_PCT}% ÷ reveal_count. Example: 3 requests × 0.01 XNT × 90% ÷ 3 revealers = 0.009 XNT each.` },
           ].map(({ step, title, desc }) => (
             <div key={step} className="flex gap-4">
@@ -387,7 +387,7 @@ cd x1-randomness-protocol/keeper
 npm install
 
 # Register your validator (one-time, requires ≥1000 XNT staked)
-node run-round.js --register
+VALIDATOR_KEYPAIR=/path/to/your-identity-key.json node validator-daemon.js --register
 
 # Run the validator daemon (holds only your identity key)
 VALIDATOR_KEYPAIR=/path/to/your-identity-key.json node validator-daemon.js --loop

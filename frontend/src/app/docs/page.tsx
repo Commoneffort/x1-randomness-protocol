@@ -104,7 +104,7 @@ export default function DocsPage() {
               },
               {
                 title: "EntropyEngine V4 (external program, CPI)",
-                desc: "Runs the commit/reveal cycle. Up to 10 validators stake 0.01 XNT each, commit a hashed secret, then reveal it. After the binding slot (~675 slots / ~4.2 min), the EE V4 round finalizes and produces entropy_output.",
+                desc: "Runs the commit/reveal cycle. Validators (n=2 currently; grows with validator set) stake 0.01 XNT each, commit a hashed secret before commit_deadline (~200 slots), then reveal before reveal_deadline (~600 slots). After the binding slot (~675 slots / ~4.2 min), finalize_via_ee produces entropy_output.",
               },
             ].map(({ title, desc }) => (
               <div key={title} className="p-3 bg-surface-elevated rounded-lg border border-border">
@@ -125,8 +125,8 @@ export default function DocsPage() {
           <p>Each protocol round maps to one EE V4 commit/reveal cycle:</p>
           <div className="space-y-2 mt-2">
             {[
-              { n: "1", color: "bg-blue-50 border-blue-200", label: "commit_via_ee", desc: "Validators stake 0.01 XNT and submit a hashed secret to the EE V4 round. Up to 10 validators per round." },
-              { n: "2", color: "bg-yellow-50 border-yellow-200", label: "reveal_via_ee", desc: "After the binding slot (≥675 slots from round init), validators reveal their secret. This creates a ValidatorReveal PDA recording participation. The 0.01 XNT stake is returned on valid reveal." },
+              { n: "1", color: "bg-blue-50 border-blue-200", label: "commit_via_ee", desc: "Validators stake 0.01 XNT and submit a hashed secret before commit_deadline (~200 slots after round init). Currently n=2 validators per round (grows with validator set; EE V4 max is 10)." },
+              { n: "2", color: "bg-yellow-50 border-yellow-200", label: "reveal_via_ee", desc: "After commit_deadline (~200 slots) and before reveal_deadline (~600 slots), validators reveal their secret. This creates a ValidatorReveal PDA recording participation. The 0.01 XNT stake is returned on valid reveal." },
               { n: "3", color: "bg-green-50 border-green-200", label: "finalize_via_ee + aggregate_from_ee", desc: "Any signer calls finalize_via_ee to mark the EE V4 round done, then aggregate_from_ee to mix entropy into the pool: SHA256(ee_output ‖ slot_hash). Both are permissionless cranks. EntropyPool is now warm." },
               { n: "4", color: "bg-purple-50 border-purple-200", label: "distribute_fees", desc: "Permissionless crank. Takes 10% insurance cut, records original_fees on the FeeEscrow, marks fee_distributed = true. Validators can now claim their share." },
               { n: "5", color: "bg-orange-50 border-orange-200", label: "claim_validator_reward", desc: "Each validator calls this once per round to receive: original_fees × 90% ÷ reveal_count. Requires the ValidatorReveal PDA created at reveal time." },
@@ -464,8 +464,8 @@ const ix = new TransactionInstruction({
           <div className="space-y-2 mt-2">
             {[
               { n: "1", title: "Start the next round", body: `Call advance_round + create_fee_escrow (permissionless, any signer), then init_ee_round(ee_round_id = current+1). n, m, and binding_slot are protocol constants — not caller args. First validator to land init_ee_round opens the commit window.` },
-              { n: "2", title: "Commit", body: `Call commit_via_ee(SHA256(secret || nonce || pubkey)). Stake ${EE_V4_STAKE_LAMPORTS / 1e9} XNT. Up to 10 validators can commit.` },
-              { n: "3", title: "Reveal", body: "After binding_slot (~4.2 min), call reveal_via_ee(secret, nonce). Stake is returned. Creates a ValidatorReveal PDA for fee claiming." },
+              { n: "2", title: "Commit", body: `Call commit_via_ee(SHA256(secret || nonce || pubkey)) before commit_deadline (~200 slots). Stake ${EE_V4_STAKE_LAMPORTS / 1e9} XNT. Currently n=2 validators per round (EE V4 max is 10).` },
+              { n: "3", title: "Reveal", body: "After commit_deadline (~200 slots) and before reveal_deadline (~600 slots / ~3.75 min), call reveal_via_ee(secret, nonce). Stake is returned. Creates a ValidatorReveal PDA for fee claiming." },
               { n: "4", title: "Finalize + aggregate", body: "Call finalize_via_ee (permissionless), then aggregate_from_ee. Pool is now warm — queued requests are fulfilled." },
               { n: "5", title: "Claim reward", body: "Call distribute_fees (permissionless), then claim_validator_reward. Receive original_fees × 90% ÷ reveal_count." },
             ].map(({ n, title, body }) => (
@@ -485,8 +485,8 @@ const ix = new TransactionInstruction({
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
             {[
-              { k: "Max validators per round", v: "10 (EE V4 hardcoded limit)" },
-              { k: "Minimum reveal threshold", v: "2 (enforced by wrapper, prevents solo runs)" },
+              { k: "Validators per round", v: "n=2 (wrapper config; EE V4 hardcoded max is 10)" },
+              { k: "Minimum reveal threshold", v: "m=2 (enforced by wrapper, prevents solo runs)" },
               { k: "Commit stake", v: `${EE_V4_STAKE_LAMPORTS / 1e9} XNT (returned on valid reveal)` },
               { k: "Binding slot minimum", v: "675 slots (~4.2 min after round init)" },
               { k: "Slash on non-reveal", v: `${EE_V4_STAKE_LAMPORTS / 1e9} XNT forfeited to EE V4 slash pool` },
@@ -565,8 +565,8 @@ const ix = new TransactionInstruction({
                 a: "The EE V4 round is cancelled (status = 3). The pool does not update. Requesters can call refund_request to recover their fee.",
               },
               {
-                q: "What is the EE V4 10-validator cap?",
-                a: "EntropyEngine V4 is hardcoded to accept at most 10 contributors per round. This is a constraint of the external program, not the wrapper. If more validators want to participate, they must wait for future rounds.",
+                q: "How many validators participate per round?",
+                a: "The wrapper sets n_contributors=2 and m_threshold=2 when opening each EE V4 round, meaning exactly 2 validators commit and reveal per round. This matches the current validator set size. EntropyEngine V4 is hardcoded to accept at most 10 contributors per round total. As the validator set grows, n will be increased to match.",
               },
               {
                 q: "How do I earn rewards as a validator?",

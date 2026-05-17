@@ -1,4 +1,4 @@
-// X1 Randomness Protocol V3 Constants
+// X1 Randomness Protocol V4 Constants
 
 export const PROGRAM_ID = "BSKTJpgAGHRaSMLA88chYPKuSuD9qbesEcHYmUrBWU7R";
 export const ENTROPY_ENGINE_V4 = "FDyWtM9UBNfXNuc5oZJ1V86d3dz635WnqMfX8x5Uifbm";
@@ -54,4 +54,4 @@ export const ACCT_DISC = {
 export const MIN_VALIDATOR_STAKE_XNT = 1000;
 export const MIN_VALIDATOR_STAKE_LAMPORTS = MIN_VALIDATOR_STAKE_XNT * 1_000_000_000;
 export const VALIDATOR_MAX_INACTIVE_SLOTS = 500;
-export const MIN_COMMITTEE_SIZE = 3;
+export const MIN_COMMITTEE_SIZE = 2;

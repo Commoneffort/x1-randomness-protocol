@@ -47,7 +47,7 @@ On-demand verifiable randomness on X1 Mainnet. A fully permissionless, decentral
 ┌──────────────────────────────────────────────────────────┐
 │  Entropy Engine V4 (FDyWt...)                             │
 │  Immutable · RANDAO + VDF · Perpetual round cycle        │
-│  Max 10 contributors per round · SHA256-chain accumulator │
+│  n=2 contributors per round (grows with validator set)   │
 │  Commit stake 0.01 XNT (returned on valid reveal)        │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -112,7 +112,7 @@ create_fee_escrow(round)
 
 ```
 init_ee_round(ee_round_id)
-  → n=MAX_COMMITTEE_SIZE(10), m=MIN_EE_M_THRESHOLD(2),
+  → n=MIN_EE_M_THRESHOLD(2), m=MIN_EE_M_THRESHOLD(2),
     binding_slot=current_slot+EE_V4_MIN_BINDING_SLOTS(675) — all derived on-chain
   → CPIs initialize_round into EE V4
   → creates WrapperRound PDA [b"wrapper-round", ee_round_id]
@@ -129,7 +129,7 @@ commit_via_ee(commitment)
   → commitment = SHA256(secret ‖ nonce ‖ contributor_pubkey)
 ```
 
-### 5. Validators reveal
+### 5. Validators reveal (must arrive before reveal_deadline ~600 slots)
 
 ```
 reveal_via_ee(secret, nonce)
@@ -137,13 +137,17 @@ reveal_via_ee(secret, nonce)
   → verifies commitment, accumulates entropy via SHA256-chain
   → returns 0.01 XNT stake to contributor
   → creates ValidatorReveal PDA [b"validator-reveal", ee_round, contributor]
+  → must be called after commit_deadline (~200 slots) and before reveal_deadline (~600 slots)
 ```
 
-### 6. Finalize (permissionless)
+### 6. Finalize (permissionless, after binding_slot ~675 slots)
 
 ```
 finalize_via_ee()
   → CPIs finalize into EE V4 (binds slot hash, produces entropy_output)
+  → requires current_slot >= binding_slot (~init_slot + 675)
+  → NOTE: if current_slot > binding_slot + 512, the slot hash is pruned from SlotHashes
+    and finalization is permanently impossible — cancel the EE round and open a new one
   → mixes: SHA256(ee_entropy ‖ slot_hash) into EntropyPool
   → marks the EE WrapperRound as aggregated
 ```
@@ -425,7 +429,7 @@ Tests 21 instructions in sequence. The EE V4 commit/reveal/finalize cycle waits 
 cd keeper && npm install
 
 # Register your validator (one-time)
-node run-round.js --register
+VALIDATOR_KEYPAIR=/path/to/identity.json node validator-daemon.js --register
 
 # Run your personal validator daemon (holds only your identity key)
 VALIDATOR_KEYPAIR=/path/to/identity.json node validator-daemon.js --loop
@@ -478,6 +482,15 @@ If an EE V4 round is cancelled (status byte 140 == 3), `refund_request` lets req
 `claim_validator_fees` (dust sweep) sends residual lamports to `insurance_fund`, not to the authority's personal wallet.
 
 ## Changelog
+
+### V4.1 (2026-05-17) — phase timing + n_contributors fix
+
+- **`n_contributors = 2` (was 10)** — `init_ee_round` now passes `n=MIN_EE_M_THRESHOLD(2)` instead of `MAX_COMMITTEE_SIZE(10)`. With only 2 validators, n=10 meant `commit_count` never reached `n_contributors` and rounds were permanently stuck in CommitPhase.
+- **Commit/reveal phase gating fixed** — validator daemon now uses `commit_deadline` (EE round offset 50, ~init+200 slots) to split commit and reveal phases. Previously used `binding_slot` (offset 66, ~init+675 slots) which is for `finalize_via_ee`, not reveals — reveals were always sent after the reveal window closed, causing WrongPhase errors.
+- **Reveal deadline** — reveals must arrive before `reveal_deadline` (EE round offset 58, ~init+600 slots / ~3.75 min). `binding_slot` (offset 66, ~init+675 slots) only gates `finalize_via_ee`.
+- **Expired slot hash detection** — if `current_slot > binding_slot + 512`, the EE round's binding slot hash has been pruned from SlotHashes and finalization is permanently impossible. Daemon detects this, logs the stuck round, and opens the next EE round.
+- **Crank EE round ID alignment** — crank now finalizes `eeV4RoundId` (the round validators just opened) rather than `eeV4RoundId+1`, fixing a one-round-ahead offset that caused ConstraintSeeds on `finalize_via_ee`.
+- **next-round gating** — daemon only calls `init_ee_round(nextId)` after the current round is finalized or cancelled (`status == 2 || 3`), preventing config advancement before the crank can finalize.
 
 ### V4 (2026-05-16) — fully decentralised
 
