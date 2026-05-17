@@ -1,8 +1,8 @@
 # X1 Randomness Protocol — Audit Report
 
-**Date:** 2026-05-16  
+**Date:** 2026-05-17 (updated)  
 **Scope:** Full codebase — Anchor program, keeper scripts, frontend, documentation  
-**Protocol version at time of audit:** V4 (post-decentralisation refactor)
+**Protocol versions audited:** V4 (post-decentralisation), V4.2 (security hardening)
 
 ---
 
@@ -10,9 +10,11 @@
 
 | Area | Issues Found | Issues Fixed | Status |
 |------|-------------|-------------|--------|
-| Anchor program (`lib.rs`) | 0 | 0 | ✅ PASS |
-| Keeper crank (`run-round.js`) | 0 | 0 | ✅ PASS |
-| Validator daemon (`validator-daemon.js`) | 0 | 0 | ✅ PASS |
+| Anchor program (`lib.rs`) — V4 | 0 | 0 | ✅ PASS |
+| Anchor program (`lib.rs`) — V4.2 | 9 | 9 | ✅ FIXED |
+| Keeper crank (`run-round.js`) | 2 | 2 | ✅ FIXED |
+| Validator daemon (`validator-daemon.js`) | 2 | 2 | ✅ FIXED |
+| Tests (`mainnet-e2e.js`) | 2 | 2 | ✅ FIXED |
 | Frontend library (`protocol.ts`, `constants.ts`, `pdas.ts`) | 0 | 0 | ✅ PASS |
 | Frontend UI — home dashboard (`page.tsx`) | 3 | 3 | ✅ FIXED |
 | Frontend UI — docs (`docs/page.tsx`) | 11 | 11 | ✅ FIXED |
@@ -23,7 +25,8 @@
 | README.md | 7 | 7 | ✅ FIXED |
 | Obsolete file (`validator-daemon.ts`) | 1 | 0 | ⚠️ PRESENT |
 
-**Total:** 29 issues found, 28 fixed, 1 non-critical leftover.
+**Total V4 audit:** 29 issues found, 28 fixed, 1 non-critical leftover.  
+**Total V4.2 audit:** 15 additional issues found, 15 fixed.
 
 ---
 
@@ -181,6 +184,38 @@ Round lifecycle legend, fee display, and status badges are all accurate.
 | 5 | High | Key Formulas table: fast path output = `SHA256(entropy_pool.current_entropy \|\| request_id)` — missing `slot_hash` | Added `‖ slot_hash` |
 | 6 | Critical | Security section "Authority-Gated Round Initialization": stated `init_ee_round` is restricted to `protocol_config.authority` — **this was the V2.2 rule, reversed in V4** | Replaced with V4 reality: permissionless but constrained by sequential ID and protocol constants |
 | 7 | Medium | `update_dapp_fee` description in instructions table: "dApp authority" | Corrected to "Protocol authority" |
+
+---
+
+## V4.2 Security Audit (2026-05-17)
+
+### Anchor Program — V4.2 findings (all fixed)
+
+| ID | Severity | Instruction | Issue | Fix |
+|----|----------|-------------|-------|-----|
+| C-1 | Critical | `request_randomness` | `fee_override` read from `dapp_info` without verifying account owner or discriminator. A 1-lamport account with a single `fee_override=0` byte at offset 136 bypasses fees entirely. | Added `dapp_info.owner == &ID` + discriminator check before reading field. |
+| C-2 | Critical | `mark_validator_missed` | No check that the validator was registered before the EE round opened. Three old finalized/cancelled rounds = instant deactivation of any new validator. | Added `registered_slot < binding_slot − EE_V4_MIN_BINDING_SLOTS` guard. |
+| H-1 | High | `register_validator` | No check that vote account's `node_pubkey` matches the signing identity. Validator could borrow a high-stake validator's vote + stake accounts to register with inflated credentials. | Added VoteState `node_pubkey` check at offset 4. |
+| H-2 | High | `advance_round` | Permissionless caller could advance the protocol round while an EE round was in flight. Protocol WrapperRound for the new round would never receive the EE entropy — stall. | Added `current_wrapper_round.aggregated == true` check; added `current_wrapper_round` account to context. |
+| M-1 | Medium | `deliver_callback` | `min_round_interval=0` skipped the interval check entirely (`if interval > 0`). Same subscriber could spam entropy pulls in a single round by calling repeatedly. | Changed to `effective_interval = min_round_interval.max(1)`. |
+| M-3 | Medium | `aggregate_from_ee` | `fee_escrow.ee_v4_round_id` was never written during aggregation. `refund_request` validated this field — but it stayed 0 after the first round, allowing cross-round escrow mismatches. | Added `fee_escrow` account to `AggregateFromEe` context; write `ee_v4_round_id = resolved_ee_round_id` at end of handler. |
+| M-4 | Medium | `init_ee_round`, `commit_via_ee` | `register_validator` now checks node_pubkey, but `init_ee_round` and `commit_via_ee` did not. A validator could still use another's vote account after registration. | Added `node_pubkey == coordinator.key()` / `node_pubkey == contributor.key()` check in both handlers. |
+| M-2 | Medium | `validator-daemon.js` saveSecrets | Ephemeral commit secret written to `/tmp/vd-secrets-*.json` with default `0o644` permissions — world-readable. | Changed `writeFileSync` to use `{ mode: 0o600 }`. |
+| L-5 | Low | `validator-daemon.js` send | Single-attempt transaction send with no retry. Transient RPC failures permanently miss the commit or reveal window. | Added 3-attempt retry loop with 5s delay and fresh blockhash per attempt. |
+
+### Keeper Scripts — V4.2 findings (all fixed)
+
+| ID | Severity | File | Issue | Fix |
+|----|----------|------|-------|-----|
+| H-2b | High | `run-round.js` `ixAdvanceRound` | Account list missing `current_wrapper_round` — the new H-2 constraint would have caused `advance_round` to fail with a missing account error. | Added `current_wrapper_round` at position 2 (between pool and new_wrapper_round). |
+| M-3b | Medium | `run-round.js` `ixAggregateFromEe` | Account list missing `fee_escrow` — the new M-3 account would have caused `aggregate_from_ee` to fail. | Added `fee_escrow` at position 3 (between pool and ee_round), writable. |
+
+### Test Suite — V4.2 findings (all fixed)
+
+| ID | Severity | File | Issue | Fix |
+|----|----------|------|-------|-----|
+| H-2c | High | `tests/mainnet-e2e.js` `buildAdvanceRound` | Same missing account as run-round.js. | Added `current_wrapper_round` at position 2. |
+| M-3c | Medium | `tests/mainnet-e2e.js` `buildAggregateFromEe` | Same missing account as run-round.js. | Added `fee_escrow` at position 3. |
 
 ---
 

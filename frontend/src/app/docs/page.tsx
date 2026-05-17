@@ -536,6 +536,22 @@ const ix = new TransactionInstruction({
                 title: "Liveness protection",
                 desc: "If an EE V4 round is cancelled (status byte 140 == 3), refund_request lets requesters recover their fee from the FeeEscrow.",
               },
+              {
+                title: "Validator credential binding",
+                desc: "register_validator, init_ee_round, and commit_via_ee all read the vote account's node_pubkey (offset 4) and require it matches the signing identity. A validator cannot borrow another's vote or stake accounts to inflate credentials or impersonate them during commits.",
+              },
+              {
+                title: "No premature round advance",
+                desc: "advance_round requires the current protocol round's WrapperRound.aggregated == true before creating the next round. This prevents stranding an in-flight EE round without a protocol round to receive its entropy.",
+              },
+              {
+                title: "Cross-round refund protection",
+                desc: "aggregate_from_ee stamps fee_escrow.ee_v4_round_id with the actual EE round that serviced the protocol round. refund_request validates this field, preventing requests from claiming refunds against a different round's escrow.",
+              },
+              {
+                title: "mark_validator_missed timing guard",
+                desc: "mark_validator_missed only counts a miss if the validator was registered before the EE round opened (registered_slot < binding_slot − 675). This blocks using historical finalized/cancelled rounds to instantly deactivate newly registered validators.",
+              },
             ].map(({ title, desc }) => (
               <div key={title} className="flex gap-3 p-3 bg-surface-elevated rounded-lg border border-border">
                 <ShieldCheckIcon className="h-5 w-5 text-green-600 shrink-0 mt-0.5" />

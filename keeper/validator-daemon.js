@@ -83,14 +83,27 @@ function findPda(seeds) { return PublicKey.findProgramAddressSync(seeds, PROGRAM
 function readU64(d, o)  { return Number(d.readBigUInt64LE(o)); }
 
 async function send(ix, label) {
-  const tx = new Transaction();
-  if (Array.isArray(ix)) { ix.forEach(i => tx.add(i)); } else { tx.add(ix); }
-  tx.feePayer = identity.publicKey;
-  const { blockhash } = await conn.getLatestBlockhash("confirmed");
-  tx.recentBlockhash = blockhash;
-  const sig = await sendAndConfirmTransaction(conn, tx, [identity], { commitment: "confirmed" });
-  console.log(`  ✓ ${label}: ${sig.slice(0, 20)}…`);
-  return sig;
+  const MAX_ATTEMPTS = 3;
+  let lastErr;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const tx = new Transaction();
+      if (Array.isArray(ix)) { ix.forEach(i => tx.add(i)); } else { tx.add(ix); }
+      tx.feePayer = identity.publicKey;
+      const { blockhash } = await conn.getLatestBlockhash("confirmed");
+      tx.recentBlockhash = blockhash;
+      const sig = await sendAndConfirmTransaction(conn, tx, [identity], { commitment: "confirmed" });
+      console.log(`  ✓ ${label}: ${sig.slice(0, 20)}…`);
+      return sig;
+    } catch (e) {
+      lastErr = e;
+      if (attempt < MAX_ATTEMPTS) {
+        console.warn(`  ⚠ ${label} attempt ${attempt} failed: ${e.message} — retrying in 5s`);
+        await new Promise(r => setTimeout(r, 5000));
+      }
+    }
+  }
+  throw lastErr;
 }
 
 // ── PDAs ───────────────────────────────────────────────────────────────────────
@@ -114,7 +127,7 @@ function saveSecrets(eeRoundId, secret, nonce) {
     eeRoundId,
     secret: secret.toString("hex"),
     nonce:  nonce.toString("hex"),
-  }));
+  }), { mode: 0o600 });
 }
 function loadSecrets(eeRoundId) {
   try {

@@ -169,10 +169,15 @@ function ixRefreshValidatorStatus(identity, voteAccount, stakeAccount) {
 
 function ixAdvanceRound(newRound) {
   const [cfg] = cfgPda(); const [pool] = poolPda(); const [wr] = wrapperPda(newRound);
+  // H-2 fix: pass current round's WrapperRound so the program can verify it's aggregated.
+  // Round 0→1 transition: current round is 0, pass SystemProgram as the "no-op" sentinel.
+  const currentRound = newRound - 1;
+  const [curWr] = currentRound > 0 ? wrapperPda(currentRound) : [SystemProgram.programId];
   return new TransactionInstruction({ programId: PROGRAM_ID,
     keys: [
       { pubkey: cfg,                     isSigner: false, isWritable: true },
       { pubkey: pool,                    isSigner: false, isWritable: true },
+      { pubkey: curWr,                   isSigner: false, isWritable: false },
       { pubkey: wr,                      isSigner: false, isWritable: true },
       { pubkey: payer.publicKey,         isSigner: true,  isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
@@ -242,11 +247,13 @@ function ixFinalizeViaEe(eeRoundId, eeRound) {
 
 function ixAggregateFromEe(protocolRound, eeRound) {
   const [cfg] = cfgPda(); const [wr] = wrapperPda(protocolRound); const [pool] = poolPda();
+  const [escrow] = escrowPda(protocolRound);
   return new TransactionInstruction({ programId: PROGRAM_ID,
     keys: [
       { pubkey: cfg,                       isSigner: false, isWritable: false },
       { pubkey: wr,                        isSigner: false, isWritable: true },
       { pubkey: pool,                      isSigner: false, isWritable: true },
+      { pubkey: escrow,                    isSigner: false, isWritable: true },  // M-3 fix
       { pubkey: eeRound,                   isSigner: false, isWritable: false },
       { pubkey: SYSVAR_SLOT_HASHES_PUBKEY, isSigner: false, isWritable: false },
       { pubkey: payer.publicKey,           isSigner: true,  isWritable: false },

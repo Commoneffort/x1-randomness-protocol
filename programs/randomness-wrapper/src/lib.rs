@@ -38,7 +38,7 @@ pub const VALIDATOR_MAX_INACTIVE_SLOTS: u64 = 500;
 /// automatically marked inactive by mark_validator_missed.
 pub const VALIDATOR_MAX_CONSECUTIVE_MISSES: u8 = 3;
 /// Minimum number of distinct validators that must commit in any EE V4 round.
-pub const MIN_COMMITTEE_SIZE: u8 = 3;
+pub const MIN_COMMITTEE_SIZE: u8 = 2;
 /// Maximum committee size per EE V4 round — up to 10 validators may commit.
 pub const MAX_COMMITTEE_SIZE: u8 = 10;
 /// Minimum binding slot offset for EE V4 rounds (~4.2 min at 375 ms/slot).
@@ -68,6 +68,10 @@ pub const STAKE_LAMPORTS_OFFSET: usize = 156;
 pub const STAKE_DEACTIVATION_EPOCH_OFFSET: usize = 172;
 pub const STAKE_VARIANT_ACTIVE: u32 = 2;
 pub const DEACTIVATION_EPOCH_NONE: u64 = u64::MAX;
+/// Offset of node_pubkey (32 bytes) in VoteState account data (after 4-byte version tag).
+pub const VOTE_NODE_PUBKEY_OFFSET: usize = 4;
+/// Anchor account discriminator for DappRegistration: sha256("account:DappRegistration")[:8]
+pub const DAPP_REGISTRATION_DISC: [u8; 8] = [3, 84, 148, 231, 130, 18, 2, 52];
 
 // ── EE V4 CPI Shims ──────────────────────────────────────────────────────────
 // These mirror EntropyEngine V4's instruction interface for CPI calls.
@@ -695,6 +699,14 @@ pub struct AggregateFromEe<'info> {
         bump = entropy_pool.bump,
     )]
     pub entropy_pool: Account<'info, EntropyPool>,
+    /// Fee escrow for this protocol round — updated with the actual EE round ID so
+    /// stale cancelled-round refunds are blocked once aggregation succeeds.
+    #[account(
+        mut,
+        seeds = [b"fee-escrow", &wrapper_round.round.to_le_bytes()],
+        bump = fee_escrow.bump,
+    )]
+    pub fee_escrow: Account<'info, FeeEscrow>,
     /// CHECK: EE V4 Round account — must be owned by EE V4 program and finalized.
     #[account(
         constraint = ee_round.owner == &ENTROPY_ENGINE_V4 @ RandomnessError::InvalidEeV4RoundResult,
@@ -721,6 +733,10 @@ pub struct AdvanceRound<'info> {
         bump = entropy_pool.bump,
     )]
     pub entropy_pool: Account<'info, EntropyPool>,
+    /// CHECK: Current round's WrapperRound — must be aggregated (entropy mixed) before
+    /// advancing. Prevents permanently stalling aggregate_from_ee for in-flight EE rounds.
+    /// Pass the PDA for protocol_config.current_round. For round 0 pass SystemProgram.
+    pub current_wrapper_round: AccountInfo<'info>,
     /// CHECK: PDA for new wrapper round
     #[account(mut)]
     pub new_wrapper_round: AccountInfo<'info>,
@@ -1123,12 +1139,18 @@ pub mod randomness_wrapper {
             let protocol_fee = ctx.accounts.protocol_config.request_fee;
             let dapp_info = &ctx.accounts.dapp_registration;
             if dapp_info.key() != System::id() && !dapp_info.data_is_empty() {
+                // Validate ownership and discriminator — prevents fee bypass via crafted accounts.
+                require!(dapp_info.owner == &ID, RandomnessError::Unauthorized);
                 let dapp_data = dapp_info.try_borrow_data()?;
-                if dapp_data.len() >= 145 {
-                    let override_fee = u64::from_le_bytes(
-                        dapp_data[136..144].try_into().unwrap_or([0u8; 8])
-                    );
-                    if override_fee > 0 { override_fee } else { protocol_fee }
+                require!(dapp_data.len() >= 145, RandomnessError::Unauthorized);
+                require!(&dapp_data[..8] == &DAPP_REGISTRATION_DISC, RandomnessError::Unauthorized);
+                let override_fee = u64::from_le_bytes(
+                    dapp_data[136..144].try_into().unwrap_or([0u8; 8])
+                );
+                if override_fee > 0 {
+                    // Fee override must not be below the protocol minimum.
+                    require!(override_fee >= protocol_fee, RandomnessError::InsufficientFee);
+                    override_fee
                 } else {
                     protocol_fee
                 }
@@ -1235,6 +1257,14 @@ pub mod randomness_wrapper {
             RandomnessError::InvalidStakeAccount
         );
 
+        // Verify the caller owns this vote account: node_pubkey at offset 4 must match identity.
+        require!(vote_data.len() >= VOTE_NODE_PUBKEY_OFFSET + 32, RandomnessError::InvalidVoteAccount);
+        let node_pubkey = Pubkey::from(
+            <[u8; 32]>::try_from(&vote_data[VOTE_NODE_PUBKEY_OFFSET..VOTE_NODE_PUBKEY_OFFSET + 32])
+                .map_err(|_| error!(RandomnessError::InvalidVoteAccount))?
+        );
+        require!(node_pubkey == ctx.accounts.identity.key(), RandomnessError::Unauthorized);
+
         let (voter_pubkey, staked_lamports) = parse_stake_account(&stake_data)?;
         require!(
             voter_pubkey == ctx.accounts.vote_account.key(),
@@ -1323,6 +1353,19 @@ pub mod randomness_wrapper {
         let status = ee_data[140];
         require!(status == 2 || status == 3, RandomnessError::EeV4RoundNotFinalized);
 
+        // C-2: Reject historical rounds opened before the validator registered.
+        // Without this an attacker submits 3 old finalized/cancelled EE rounds the
+        // validator never had a chance to participate in, accumulating 3 misses instantly.
+        require!(ee_data.len() >= 74, RandomnessError::InvalidEeV4RoundResult);
+        let binding_slot = u64::from_le_bytes(
+            ee_data[66..74].try_into().map_err(|_| error!(RandomnessError::InvalidEeV4RoundResult))?
+        );
+        let approx_init_slot = binding_slot.saturating_sub(EE_V4_MIN_BINDING_SLOTS);
+        require!(
+            ctx.accounts.validator_registration.registered_slot < approx_init_slot,
+            RandomnessError::Unauthorized
+        );
+
         // Derive the expected ValidatorReveal PDA on-chain — attacker cannot fake this.
         let (expected_pda, _) = Pubkey::find_program_address(
             &[
@@ -1380,6 +1423,13 @@ pub mod randomness_wrapper {
         {
             let vote_data = ctx.accounts.coordinator_vote.try_borrow_data()?;
             let stake_data = ctx.accounts.coordinator_stake.try_borrow_data()?;
+            // Verify coordinator owns this vote account.
+            require!(vote_data.len() >= VOTE_NODE_PUBKEY_OFFSET + 32, RandomnessError::InvalidVoteAccount);
+            let node_pubkey = Pubkey::from(
+                <[u8; 32]>::try_from(&vote_data[VOTE_NODE_PUBKEY_OFFSET..VOTE_NODE_PUBKEY_OFFSET + 32])
+                    .map_err(|_| error!(RandomnessError::InvalidVoteAccount))?
+            );
+            require!(node_pubkey == ctx.accounts.coordinator.key(), RandomnessError::Unauthorized);
             let (voter, lamports) = parse_stake_account(&stake_data)?;
             require!(voter == ctx.accounts.coordinator_vote.key(), RandomnessError::StakeNotDelegatedToVote);
             require!(lamports >= MIN_VALIDATOR_STAKE, RandomnessError::InsufficientValidatorStake);
@@ -1474,6 +1524,14 @@ pub mod randomness_wrapper {
                 ctx.accounts.stake_account.key() == ctx.accounts.validator_reg.stake_account,
                 RandomnessError::InvalidStakeAccount
             );
+
+            // Verify contributor owns this vote account.
+            require!(vote_data.len() >= VOTE_NODE_PUBKEY_OFFSET + 32, RandomnessError::InvalidVoteAccount);
+            let node_pubkey = Pubkey::from(
+                <[u8; 32]>::try_from(&vote_data[VOTE_NODE_PUBKEY_OFFSET..VOTE_NODE_PUBKEY_OFFSET + 32])
+                    .map_err(|_| error!(RandomnessError::InvalidVoteAccount))?
+            );
+            require!(node_pubkey == ctx.accounts.contributor.key(), RandomnessError::Unauthorized);
 
             let (voter, lamports) = parse_stake_account(&stake_data)?;
             require!(voter == ctx.accounts.vote_account.key(), RandomnessError::StakeNotDelegatedToVote);
@@ -1784,6 +1842,11 @@ pub mod randomness_wrapper {
         wrapper_round.ee_v4_entropy_included = true;
         wrapper_round.ee_v4_round_id = resolved_ee_round_id; // record in case it was 0
 
+        // M-3: Stamp the fee escrow with the actual EE round ID that serviced this
+        // protocol round. refund_request validates this field — without the stamp,
+        // a cancelled-round refund could replay against a different EE round's escrow.
+        ctx.accounts.fee_escrow.ee_v4_round_id = resolved_ee_round_id;
+
         let pool = &mut ctx.accounts.entropy_pool;
         pool.current_entropy = aggregated_entropy;
         pool.current_round = wrapper_round.round;
@@ -1815,6 +1878,25 @@ pub mod randomness_wrapper {
                 pool_stale || slots_elapsed >= MIN_SLOTS_BETWEEN_ROUNDS * 2,
                 RandomnessError::RoundAdvanceTooEarly
             );
+        }
+
+        // H-2: Require the current round's WrapperRound to be aggregated before advancing.
+        // Without this, a permissionless caller can advance mid-round, permanently stranding
+        // the in-flight EE round with no matching protocol WrapperRound to aggregate into.
+        if config.current_round > 0 {
+            let (expected_pda, _) = Pubkey::find_program_address(
+                &[b"wrapper-round", &config.current_round.to_le_bytes()],
+                &ID,
+            );
+            require!(
+                ctx.accounts.current_wrapper_round.key() == expected_pda,
+                RandomnessError::Unauthorized
+            );
+            let wr_data = ctx.accounts.current_wrapper_round.try_borrow_data()?;
+            // offset 32 = aggregated bool; non-empty account that isn't aggregated blocks advance
+            if wr_data.len() > 32 {
+                require!(wr_data[32] != 0, RandomnessError::RoundNotAggregatable);
+            }
         }
 
         let new_round = config.current_round.checked_add(1)
@@ -1980,8 +2062,12 @@ pub mod randomness_wrapper {
         let pool = &ctx.accounts.entropy_pool;
         let config = &ctx.accounts.protocol_config;
 
+        // M-1: Enforce at least 1 round between callbacks even when min_round_interval=0.
+        // A zero interval allows the same caller to drain the pool's entropy in the same
+        // round by calling deliver_callback repeatedly until sub.last_served_round catches up.
+        let effective_interval = sub.min_round_interval.max(1);
         let rounds_since_last = config.current_round.saturating_sub(sub.last_served_round);
-        if sub.min_round_interval > 0 && rounds_since_last < sub.min_round_interval {
+        if rounds_since_last < effective_interval {
             return Err(error!(RandomnessError::RoundIntervalNotMet));
         }
 

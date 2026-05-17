@@ -210,14 +210,18 @@ function buildUnregisterAgent(authority, seed) {
 }
 
 function buildAdvanceRound(newRound) {
-  const [configPda]     = protocolConfigPda();
-  const [poolPda]       = entropyPoolPda();
-  const [newRoundPda]   = wrapperRoundPda(newRound);
+  const [configPda]   = protocolConfigPda();
+  const [poolPda]     = entropyPoolPda();
+  const [newRoundPda] = wrapperRoundPda(newRound);
+  // H-2 fix: pass current round's WrapperRound so on-chain aggregation check passes.
+  const prevRound = newRound - 1;
+  const [curRoundPda] = prevRound > 0 ? wrapperRoundPda(prevRound) : [SystemProgram.programId];
   return new TransactionInstruction({
     programId: PROGRAM_ID,
     keys: [
       { pubkey: configPda,              isSigner: false, isWritable: true },
       { pubkey: poolPda,                isSigner: false, isWritable: true },
+      { pubkey: curRoundPda,            isSigner: false, isWritable: false },
       { pubkey: newRoundPda,            isSigner: false, isWritable: true },
       { pubkey: payer.publicKey,        isSigner: true,  isWritable: true },
       { pubkey: SystemProgram.programId,isSigner: false, isWritable: false },
@@ -416,16 +420,18 @@ function buildDistributeFees(round) {
 
 function buildAggregateFromEe(callerPubkey, protocolRound, eeRound) {
   const [configPda]  = protocolConfigPda();
-  const [wrPda]      = wrapperRoundPda(protocolRound); // advance_round wrapper
+  const [wrPda]      = wrapperRoundPda(protocolRound);
   const [poolPda]    = entropyPoolPda();
+  const [escrowPda]  = feeEscrowPda(protocolRound); // M-3 fix: sync ee_v4_round_id on escrow
   return new TransactionInstruction({
     programId: PROGRAM_ID,
     keys: [
       { pubkey: configPda,               isSigner: false, isWritable: false },
       { pubkey: wrPda,                   isSigner: false, isWritable: true },
       { pubkey: poolPda,                 isSigner: false, isWritable: true },
+      { pubkey: escrowPda,               isSigner: false, isWritable: true },
       { pubkey: eeRound,                 isSigner: false, isWritable: false },
-      { pubkey: SYSVAR_SLOT_HASHES_PUBKEY, isSigner: false, isWritable: false }, // required: slot hash mixing
+      { pubkey: SYSVAR_SLOT_HASHES_PUBKEY, isSigner: false, isWritable: false },
       { pubkey: callerPubkey,            isSigner: true,  isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],

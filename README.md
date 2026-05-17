@@ -483,6 +483,19 @@ If an EE V4 round is cancelled (status byte 140 == 3), `refund_request` lets req
 
 ## Changelog
 
+### V4.2 (2026-05-17) — security hardening
+
+- **C-1: Fee bypass closed** — `request_randomness` now verifies the `dapp_info` account is owned by this program and passes the `DappRegistration` discriminator before reading the `fee_override` field. A hand-crafted 1-lamport account could previously bypass the fee entirely.
+- **C-2: Historical-round deactivation attack closed** — `mark_validator_missed` now checks that the EE round's `binding_slot − EE_V4_MIN_BINDING_SLOTS` is later than the validator's `registered_slot`. Previously, 3 old finalized/cancelled rounds could instantly deactivate any newly registered validator.
+- **H-1: Borrowed-credentials attack closed** — `register_validator` now reads `node_pubkey` at offset 4 of the VoteState account and requires it equals the signing identity. Previously a validator could register using someone else's high-stake vote + stake accounts to pass liveness and stake checks.
+- **H-2: Premature round advance closed** — `advance_round` now requires the current protocol round's `WrapperRound.aggregated == true` before creating the next round. Previously any permissionless caller could advance mid-EE-round, stranding the in-flight EE round with no protocol WrapperRound to aggregate into.
+- **M-1: Same-round callback spam closed** — `deliver_callback` now enforces `min_round_interval.max(1)`, so even subscriptions registered with `interval=0` cannot fire twice in the same round.
+- **M-3: Cross-round refund protection** — `aggregate_from_ee` now stamps `fee_escrow.ee_v4_round_id` with the resolved EE round ID. `refund_request` already validated this field; it now always matches the round that actually serviced the escrow.
+- **M-4: Node-pubkey identity check at commit time** — both `init_ee_round` and `commit_via_ee` now verify the coordinator/contributor owns the supplied vote account (same `node_pubkey` check as `register_validator`). Prevents impersonating another validator's identity at EE round time.
+- **M-2: Secrets file permissions** — `validator-daemon.js` `saveSecrets()` now writes with `mode: 0o600`; previously the ephemeral commit secret was world-readable.
+- **L-5: Transaction retry** — `validator-daemon.js` `send()` now retries up to 3 times with a fresh blockhash on each attempt.
+- **Account list updates** — `advance_round` now requires `current_wrapper_round` (position 2, read-only); `aggregate_from_ee` now requires `fee_escrow` (position 3, writable). `run-round.js`, `validator-daemon.js`, and `tests/mainnet-e2e.js` updated accordingly.
+
 ### V4.1 (2026-05-17) — phase timing + n_contributors fix
 
 - **`n_contributors = 2` (was 10)** — `init_ee_round` now passes `n=MIN_EE_M_THRESHOLD(2)` instead of `MAX_COMMITTEE_SIZE(10)`. With only 2 validators, n=10 meant `commit_count` never reached `n_contributors` and rounds were permanently stuck in CommitPhase.
