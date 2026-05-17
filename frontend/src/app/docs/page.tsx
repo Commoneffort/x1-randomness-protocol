@@ -160,7 +160,7 @@ export default function DocsPage() {
                   ["create_fee_escrow", "Create FeeEscrow PDA for a round (must precede first request)", "Anyone"],
                   ["init_ee_round", "Open next EE V4 round (id must be current+1; n/m/binding_slot are protocol constants, not caller args)", "Any registered active validator"],
                   ["commit_via_ee", "Stake 0.01 XNT + commit hashed secret; eligibility derived on-chain from pool entropy", "Validator (entropy-selected)"],
-                  ["reveal_via_ee", "Reveal secret (≥675 slots after init), creates ValidatorReveal PDA", "Validator"],
+                  ["reveal_via_ee", "Reveal secret (after commit_deadline ~200 slots, before reveal_deadline ~600 slots), creates ValidatorReveal PDA", "Validator"],
                   ["finalize_via_ee", "Finalize the EE V4 round via CPI", "Anyone (permissionless)"],
                   ["aggregate_from_ee", "Mix EE V4 entropy + SlotHash into EntropyPool", "Anyone (permissionless)"],
                   ["request_randomness", `Request entropy output (${REQUEST_FEE_LAMPORTS / 1e9} XNT standard fee; premium dApps pay more)`, "Any wallet / dApp"],

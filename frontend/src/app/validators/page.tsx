@@ -382,7 +382,7 @@ export default function ValidatorsPage() {
           Each validator runs their own daemon independently. The daemon holds only the validator's own identity key — it does not need any other validator's keys. Validators race to commit each round; the on-chain eligibility check (derived from pool entropy) determines who can participate.
         </p>
         <pre className="bg-surface-elevated border border-border rounded-lg p-4 text-sm font-mono text-text-primary overflow-x-auto whitespace-pre-wrap">{`# Clone + install
-git clone https://github.com/your-org/x1-randomness-protocol
+git clone https://github.com/Commoneffort/x1-randomness-protocol
 cd x1-randomness-protocol/keeper
 npm install
 
