@@ -591,6 +591,12 @@ If an EE V4 round is cancelled (status byte 140 == 3), `refund_request` lets req
 
 ## Changelog
 
+### V4.3 (2026-05-17) — idle gate + frontend account list fixes
+
+- **Idle gate** — crank (`run-round.js`) and validator daemon (`validator-daemon.js`) now check before opening any new EE round: if the entropy pool is warm (< 1500 slots stale) **and** there are zero unfulfilled `RequestState` accounts on-chain, they idle and poll again on the next tick instead of running a 4-minute EE commit/reveal cycle. Rounds resume automatically the moment the pool goes stale or a queued request appears.
+- **`request_randomness` account list corrected** — the `slot_hashes` sysvar (`SysvarS1otHashes111111111111111111111111111`) and the optional `dapp_registration` account (pass `SystemProgram` as opt-out) were missing from the frontend-built transaction. Both are now included at positions 6 and 7 respectively.
+- **`game_seed` account list corrected** — the `slot_hashes` sysvar was missing from the frontend-built transaction; added at position 4.
+
 ### V4.2 (2026-05-17) — security hardening
 
 - **C-1: Fee bypass closed** — `request_randomness` now verifies the `dapp_info` account is owned by this program and passes the `DappRegistration` discriminator before reading the `fee_override` field. A hand-crafted 1-lamport account could previously bypass the fee entirely.

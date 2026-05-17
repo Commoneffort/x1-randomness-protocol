@@ -483,6 +483,17 @@ const ix = new TransactionInstruction({
             (or check whether <Code>ProtocolConfig.ee_v4_round_id</Code> has a corresponding non-aggregated WrapperRound)
             and commit before the <Code>commit_deadline</Code> set in the EE V4 round.
           </p>
+          <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-800">
+            <p className="font-semibold mb-1">Idle behaviour (V4.3)</p>
+            <p>
+              Validators and the crank <strong>do not run EE rounds when nobody needs randomness</strong>.
+              Before opening a new round, both check two conditions: (1) is the entropy pool stale
+              (&gt; 1 500 slots since last aggregation), and (2) are there any unfulfilled{" "}
+              <Code>RequestState</Code> accounts on-chain? If the pool is warm <em>and</em> there are
+              no queued requests, they idle and re-check on the next poll tick. A round starts
+              automatically the moment either condition changes — no manual intervention required.
+            </p>
+          </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
             {[
               { k: "Validators per round", v: "n=2 (wrapper config; EE V4 hardcoded max is 10)" },
@@ -551,6 +562,14 @@ const ix = new TransactionInstruction({
               {
                 title: "mark_validator_missed timing guard",
                 desc: "mark_validator_missed only counts a miss if the validator was registered before the EE round opened (registered_slot < binding_slot − 675). This blocks using historical finalized/cancelled rounds to instantly deactivate newly registered validators.",
+              },
+              {
+                title: "SlotHashes sysvar required in request_randomness and game_seed",
+                desc: "Both instructions include the SlotHashes sysvar (SysvarS1otHashes111111111111111111111111111) as a required account. This ensures the output mixes in a slot hash that is unknown at submission time, making outputs unpredictable even with known pool entropy.",
+              },
+              {
+                title: "Idle gate — no wasted validator resources",
+                desc: "Validators and the crank skip opening new EE rounds when the pool is warm (< 1 500 slots stale) and there are no unfulfilled RequestState accounts. A round starts automatically when the pool goes stale or a queued request appears.",
               },
             ].map(({ title, desc }) => (
               <div key={title} className="flex gap-3 p-3 bg-surface-elevated rounded-lg border border-border">
