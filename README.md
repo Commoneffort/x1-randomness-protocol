@@ -440,6 +440,114 @@ node run-round.js --loop
 
 Requirements: ≥1,000 XNT delegated stake, active vote account voting within 500 slots.
 
+## Cancelling a Stuck EE Round (Validator Guide)
+
+Sometimes an EE V4 round gets stuck and can never complete. This happens in two situations:
+
+**Situation A — Not enough commits before the commit deadline.**
+The round opened, but fewer than 2 validators committed before the commit window closed (~200 slots / ~75 seconds after the round opened). The round is permanently stuck in `CommitPhase` and can never transition to `RevealPhase`.
+
+**Situation B — The slot hash expired.**
+The round completed commits and reveals, but nobody called `finalize_via_ee` for over 512 slots (~3.2 minutes) after the binding slot. The binding slot's hash has been pruned from the SlotHashes sysvar and finalization is permanently impossible.
+
+In both cases the round must be cancelled directly on the EE V4 program by the **round coordinator** — the validator whose daemon called `init_ee_round` (they are listed as `coordinator` in the EE round account).
+
+### Step 1 — Check whether you are the coordinator
+
+Run this to inspect the stuck round. Replace `STUCK_EE_ID` with the round number shown in your daemon logs:
+
+```bash
+node -e "
+const { Connection, PublicKey } = require('@solana/web3.js');
+const bs58 = require('bs58');
+const conn = new Connection('https://rpc.mainnet.x1.xyz', 'confirmed');
+const EE_V4 = new PublicKey('FDyWtM9UBNfXNuc5oZJ1V86d3dz635WnqMfX8x5Uifbm');
+const STUCK_EE_ID = 394782; // ← change this to the stuck round number
+async function main() {
+  function u64le(n) { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(n)); return b; }
+  const accts = await conn.getProgramAccounts(EE_V4, {
+    filters: [{ dataSize: 838 }, { memcmp: { offset: 40, bytes: bs58.encode(u64le(STUCK_EE_ID)) } }]
+  });
+  if (!accts.length) { console.log('Round not found — already cancelled or wrong ID'); return; }
+  const d = accts[0].account.data;
+  const coordinator = new PublicKey(d.slice(8, 40)).toBase58();
+  const status      = d[140]; // 0=CommitPhase, 1=RevealPhase, 2=Finalized, 3=Cancelled
+  const commits     = d[74];
+  const reveals     = d[75];
+  const bindingSlot = Number(d.readBigUInt64LE(66));
+  const slot        = await conn.getSlot();
+  const statuses    = ['CommitPhase','RevealPhase','Finalized','Cancelled'];
+  console.log('EE round account :', accts[0].pubkey.toBase58());
+  console.log('Coordinator      :', coordinator);
+  console.log('Status           :', statuses[status] || status);
+  console.log('Commits / reveals:', commits, '/', reveals);
+  console.log('Binding slot     :', bindingSlot, '  Current slot:', slot);
+  console.log('Slot hash expired:', slot > bindingSlot + 512 ? 'YES — cancel needed' : 'No');
+}
+main().catch(console.error);
+"
+```
+
+If the `Coordinator` line matches your validator identity pubkey, you are the one who must cancel. If it is a different validator, ask them to run the cancel script instead.
+
+### Step 2 — Run the cancel script
+
+Open `keeper/cancel-ee-round.js` in a text editor and change the `TARGET_EE_ID` near the top to the stuck round number:
+
+```js
+const TARGET_EE_ID = 394782n;  // ← change this number
+```
+
+Save the file, then run:
+
+```bash
+cd ~/x1-randomness-protocol/keeper
+VALIDATOR_KEYPAIR=~/.config/solana/identity.json node cancel-ee-round.js
+```
+
+The script will:
+1. Find the EE round account on-chain and confirm the status is `CommitPhase` (0).
+2. Verify that your keypair matches the coordinator address — it will refuse to run if you are not the coordinator.
+3. Collect the pubkeys of any validators who committed (so the EE program can refund their 0.01 XNT stake).
+4. Send the `cancel_round` instruction directly to the EE V4 program.
+5. Print a confirmation transaction signature.
+
+Expected output:
+
+```
+Looking for EE round 394782…
+EE round:    <pubkey>
+Coordinator: <your pubkey>
+Status:      0 (0=CommitPhase, 2=Finalized, 3=Cancelled)
+Commits:     1
+Contributors to refund: [<pubkey>]
+
+Sending cancel_round…
+✓ cancel_round: <signature>
+```
+
+### Step 3 — Restart your daemon
+
+After cancellation your daemon will see `status == 3` (Cancelled) and automatically open the next EE round:
+
+```bash
+# The daemon handles this automatically in --loop mode.
+# If you stopped it, restart it:
+VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --loop
+```
+
+### What if the round is in RevealPhase, not CommitPhase?
+
+`cancel_round` only works on rounds still in `CommitPhase` (status = 0). A round that reached `RevealPhase` (status = 1) cannot be cancelled — it will either:
+- **Complete normally** if reveals arrive before `reveal_deadline` (~600 slots / ~3.75 minutes after round open)
+- **Expire** if reveals do not arrive in time. In this case the EE program marks it `Cancelled` automatically and your daemon opens the next round.
+
+If a reveal-phase round is about to expire and you want to speed things up, call `finalize_via_ee` directly via the crank (`node run-round.js` without `--loop` will run one full cycle and finalize whatever is ready).
+
+### What about requesters waiting for randomness?
+
+If a randomness request was made during a round that gets cancelled, the requester can recover their fee by calling `refund_request` on the wrapper program. Their request is not lost — they simply re-submit it in the next round.
+
 ## Security Model
 
 ### EE V4 Program Identity
