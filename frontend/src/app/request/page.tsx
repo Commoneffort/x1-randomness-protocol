@@ -176,7 +176,9 @@ export default function RequestPage() {
 
       const [poolPda] = findEntropyPoolPda();
       const [configPda] = findProtocolConfigPda();
-      const [escrowPda] = findFeeEscrowPda(currentRound);
+      const config = await client.getProtocolConfig();
+      if (!config) throw new Error("Protocol not initialized");
+      const [escrowPda] = findFeeEscrowPda(config.currentRound);
 
       const data = Buffer.concat([Buffer.from(DISC.game_seed), gameIdBytes]);
       const slotHashesPubkey = new PublicKey(SLOT_HASHES_SYSVAR);
