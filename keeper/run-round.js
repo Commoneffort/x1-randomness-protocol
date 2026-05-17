@@ -63,8 +63,10 @@ const EE_V4      = new PublicKey("FDyWtM9UBNfXNuc5oZJ1V86d3dz635WnqMfX8x5Uifbm")
 const STAKE_PROG = new PublicKey("Stake11111111111111111111111111111111111111");
 const conn       = new Connection(RPC, "confirmed");
 
+const crankKeyPath = (process.env.CRANK_KEYPAIR || `${os.homedir()}/.config/solana/x1randomness-key.json`)
+  .replace(/^~/, os.homedir());
 const payer = Keypair.fromSecretKey(
-  new Uint8Array(JSON.parse(fs.readFileSync(`${os.homedir()}/.config/solana/x1randomness-key.json`)))
+  new Uint8Array(JSON.parse(fs.readFileSync(crankKeyPath)))
 );
 
 const args       = process.argv.slice(2);
