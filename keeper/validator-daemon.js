@@ -112,6 +112,30 @@ function cfgPda()       { return findPda([Buffer.from("protocol-config")]); }
 function poolPda()      { return findPda([Buffer.from("entropy-pool")]); }
 function escrowPda(r)   { return findPda([Buffer.from("fee-escrow"),        u64le(r)]); }
 function wrapperPda(r)  { return findPda([Buffer.from("wrapper-round"),     u64le(r)]); }
+
+// Returns true if there is work that requires a new EE round:
+// either the pool is stale (fast-path blocked) or there are queued unfulfilled requests.
+async function shouldRunEeRound() {
+  const bs58 = require("bs58");
+  const REQUEST_DISC = Buffer.from([106, 141, 109, 114, 88, 187, 109, 5]);
+  const [pAddr] = poolPda();
+  const poolData    = (await conn.getAccountInfo(pAddr)).data;
+  const available   = poolData[48] !== 0;
+  const lastAggSlot = readU64(poolData, 49);
+  const nowSlot     = await conn.getSlot("confirmed");
+  const slotsStale  = nowSlot - lastAggSlot;
+  const poolFresh   = available && slotsStale < 1500;
+  if (!poolFresh) return true;  // pool stale — must run
+  const pending = await conn.getProgramAccounts(PROGRAM_ID, {
+    filters: [
+      { dataSize: 202 },
+      { memcmp: { offset: 0,   bytes: bs58.encode(REQUEST_DISC) } },
+      { memcmp: { offset: 152, bytes: bs58.encode(Buffer.from([0])) } },
+    ],
+    dataSlice: { offset: 0, length: 0 },
+  });
+  return pending.length > 0;
+}
 function valRegPda(id)  { return findPda([Buffer.from("val-reg"),            id.toBuffer()]); }
 function vrPda(eeR, c)  { return findPda([Buffer.from("validator-reveal"),   eeR.toBuffer(), c.toBuffer()]); }
 function eeRoundPda(coordinator, roundId) {
@@ -305,6 +329,10 @@ async function runOnce() {
   // round_id field matches rather than guessing the coordinator.
   const [eeWrAddr] = wrapperPda(eeV4RoundId);
   if (!await conn.getAccountInfo(eeWrAddr)) {
+    if (!await shouldRunEeRound()) {
+      console.log(`  EE round ${eeV4RoundId} not initialised — pool warm, no pending requests, idling`);
+      return;
+    }
     // Current EE round not yet initialized — open it (binding slot not set yet so safe)
     console.log(`  EE round ${eeV4RoundId} not initialised — calling init_ee_round as coordinator`);
     try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status"); } catch (_) {}
@@ -420,11 +448,15 @@ async function runOnce() {
       const nextEeId = eeV4RoundId + 1;
       const [nextEeWrAddr] = wrapperPda(nextEeId);
       if (!await conn.getAccountInfo(nextEeWrAddr)) {
-        console.log(`  EE round ${eeV4RoundId} done (status=${eeStatus}) — opening next EE round ${nextEeId}`);
-        try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status"); } catch (_) {}
-        const { ix } = ixInitEeRound(identity.publicKey, voteAccount, stakeAccount, nextEeId);
-        await send(ix, `init_ee_round(id=${nextEeId})`);
-        console.log(`  ✓ EE round ${nextEeId} opened — n=2, m=2, binding_slot=current+675`);
+        if (!await shouldRunEeRound()) {
+          console.log(`  EE round ${eeV4RoundId} done — pool warm, no pending requests, idling`);
+        } else {
+          console.log(`  EE round ${eeV4RoundId} done (status=${eeStatus}) — opening next EE round ${nextEeId}`);
+          try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status"); } catch (_) {}
+          const { ix } = ixInitEeRound(identity.publicKey, voteAccount, stakeAccount, nextEeId);
+          await send(ix, `init_ee_round(id=${nextEeId})`);
+          console.log(`  ✓ EE round ${nextEeId} opened — n=2, m=2, binding_slot=current+675`);
+        }
       }
     } else {
       console.log(`  EE round ${eeV4RoundId} status=${eeStatus} — waiting for finalization before opening next round`);

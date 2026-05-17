@@ -415,6 +415,35 @@ async function runRound() {
     }
   }
 
+  // ── Idle gate ────────────────────────────────────────────────────────────────
+  // Skip advancing if the pool is warm and nobody has queued unfulfilled requests.
+  // Fast-path requests are fulfilled immediately from pool entropy and don't need a
+  // new EE round. Only advance when the pool is stale OR requests are queued.
+  {
+    const bs58 = require("bs58");
+    const REQUEST_DISC = Buffer.from([106, 141, 109, 114, 88, 187, 109, 5]);
+    const [idlePoolAddr] = poolPda();
+    const idlePoolData = (await conn.getAccountInfo(idlePoolAddr)).data;
+    const poolAvailable  = idlePoolData[48] !== 0;
+    const lastAggSlot    = readU64(idlePoolData, 49);
+    const nowSlot        = await conn.getSlot("confirmed");
+    const slotsStale     = nowSlot - lastAggSlot;
+    const poolFresh      = poolAvailable && slotsStale < 1500;
+    const pendingReqs    = await conn.getProgramAccounts(PROGRAM_ID, {
+      filters: [
+        { dataSize: 202 },
+        { memcmp: { offset: 0,   bytes: bs58.encode(REQUEST_DISC) } },
+        { memcmp: { offset: 152, bytes: bs58.encode(Buffer.from([0])) } },
+      ],
+      dataSlice: { offset: 0, length: 0 },
+    });
+    if (poolFresh && pendingReqs.length === 0) {
+      console.log(`\n  Pool warm (${slotsStale} slots old), no pending requests — idling`);
+      return;
+    }
+    console.log(`\n  Reason to advance: pool=${poolAvailable ? 'warm' : 'cold'} (${slotsStale} slots stale), pending=${pendingReqs.length}`);
+  }
+
   // ── Step 2: Advance to next round + create fee escrow ─────────────────────
   // WrapperRound[currentRound].aggregated is now true — advance is unblocked.
   console.log(`\n[2] Advance round → ${nextRound} + create fee escrow`);
