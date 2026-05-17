@@ -116,10 +116,6 @@ VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --regi
 
 **Idle gate (V4.3):** Both the crank and validator daemon check before opening any new EE round: if the entropy pool is warm (< 1 500 slots stale) AND there are no unfulfilled `RequestState` accounts on-chain, they idle and re-poll without sending any transactions. A round starts automatically when a queued request appears or the pool goes stale. Running both processes costs nothing when the protocol is idle.
 
-**Registered validators:**
-- `8byEUEZ2sMfP6RPX9VD8JCvCQK3F5FG2LytcR9TkVWag` — owlx1, nbb2cbe (`~/.config/solana/identity.json`)
-- `9oa7NAscCZ1kCQFZJng9gfwvDzrEvyWgx4F244PHmHPH` — xen_cat, nbb2cbe (`~/.config/solana/identity.json`)
-
 **init_ee_round responsibility**: The validator daemon calls `init_ee_round` (NOT the crank). The daemon gates this call on the current EE round being Finalized (status=2) or Cancelled (status=3) — it will NOT advance to the next EE round while the current one is still in progress. The crank polls for the EE WrapperRound PDA in step 3 and waits for a validator daemon to create it.
 
 ## Security constraints (added V2.2 — do not remove)
