@@ -2,6 +2,7 @@
 
 export const PROGRAM_ID = "BSKTJpgAGHRaSMLA88chYPKuSuD9qbesEcHYmUrBWU7R";
 export const ENTROPY_ENGINE_V4 = "FDyWtM9UBNfXNuc5oZJ1V86d3dz635WnqMfX8x5Uifbm";
+export const SLOT_HASHES_SYSVAR = "SysvarS1otHashes111111111111111111111111111";
 
 // RPC
 export const RPC_URL = "https://rpc.mainnet.x1.xyz";

@@ -4,7 +4,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { useX1Wallet, useConnection } from "@/lib/X1WalletContext";
 import { PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
 import { ProtocolClient } from "@/lib/protocol";
-import { PROGRAM_ID, REQUEST_FEE_LAMPORTS, GAME_SEED_FEE_LAMPORTS, DISC } from "@/lib/constants";
+import { PROGRAM_ID, REQUEST_FEE_LAMPORTS, GAME_SEED_FEE_LAMPORTS, DISC, SLOT_HASHES_SYSVAR } from "@/lib/constants";
 import { findProtocolConfigPda, findRequestPda, findEntropyPoolPda, findFeeEscrowPda, findWrapperRoundPda } from "@/lib/pdas";
 import { BoltIcon, CubeIcon, CheckCircleIcon, XCircleIcon } from "@heroicons/react/24/outline";
 
@@ -97,15 +97,19 @@ export default function RequestPage() {
         callbackInstruction,
       ]);
 
+      const slotHashesPubkey = new PublicKey(SLOT_HASHES_SYSVAR);
       const tx = new Transaction().add(new TransactionInstruction({
         programId: new PublicKey(PROGRAM_ID),
         keys: [
-          { pubkey: requestPda,      isSigner: false, isWritable: true },
-          { pubkey: publicKey,       isSigner: true,  isWritable: true },
-          { pubkey: configPda,       isSigner: false, isWritable: false },
-          { pubkey: poolPda,         isSigner: false, isWritable: true },
-          { pubkey: escrowPda,       isSigner: false, isWritable: true },
-          { pubkey: wrapperRoundPda, isSigner: false, isWritable: true },
+          { pubkey: requestPda,        isSigner: false, isWritable: true },
+          { pubkey: publicKey,         isSigner: true,  isWritable: true },
+          { pubkey: configPda,         isSigner: false, isWritable: false },
+          { pubkey: poolPda,           isSigner: false, isWritable: true },
+          { pubkey: escrowPda,         isSigner: false, isWritable: true },
+          { pubkey: wrapperRoundPda,   isSigner: false, isWritable: false },
+          { pubkey: slotHashesPubkey,  isSigner: false, isWritable: false },
+          // dapp_registration: pass SystemProgram as opt-out (no fee override)
+          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
           { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
         ],
         data,
