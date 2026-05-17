@@ -179,14 +179,16 @@ export default function RequestPage() {
       const [escrowPda] = findFeeEscrowPda(currentRound);
 
       const data = Buffer.concat([Buffer.from(DISC.game_seed), gameIdBytes]);
+      const slotHashesPubkey = new PublicKey(SLOT_HASHES_SYSVAR);
 
       const tx = new Transaction().add(new TransactionInstruction({
         programId: new PublicKey(PROGRAM_ID),
         keys: [
-          { pubkey: poolPda,   isSigner: false, isWritable: false },
-          { pubkey: configPda, isSigner: false, isWritable: false },
-          { pubkey: escrowPda, isSigner: false, isWritable: true },
-          { pubkey: publicKey, isSigner: true,  isWritable: true },
+          { pubkey: poolPda,           isSigner: false, isWritable: false },
+          { pubkey: configPda,         isSigner: false, isWritable: false },
+          { pubkey: escrowPda,         isSigner: false, isWritable: true },
+          { pubkey: publicKey,         isSigner: true,  isWritable: true },
+          { pubkey: slotHashesPubkey,  isSigner: false, isWritable: false },
           { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
         ],
         data,
