@@ -292,17 +292,14 @@ async function runRound() {
   const eeV4RoundId    = readU64(cfgData, 88);
   const insuranceFund  = new PublicKey(cfgData.slice(40, 72));
   const nextRound      = currentRound + 1;
-  // Validators call init_ee_round, so eeV4RoundId is the round THEY just opened.
-  // The crank's job is to finalize eeV4RoundId, then wait for validators to open
-  // eeV4RoundId+1 for the next protocol round. Use eeV4RoundId (not +1) for steps 3-6.
-  const thisEeId       = eeV4RoundId;
+  const thisEeId       = eeV4RoundId;   // EE round validators just opened
   const nextEeId       = eeV4RoundId + 1;
 
   const bal = await conn.getBalance(payer.publicKey);
   console.log(`\nCrank key   : ${payer.publicKey.toBase58()}`);
   console.log(`Balance     : ${(bal / LAMPORTS_PER_SOL).toFixed(4)} XNT`);
   console.log(`Protocol    : round ${currentRound} → ${nextRound}`);
-  console.log(`EE V4       : finalizing ${thisEeId}, next will be ${nextEeId}`);
+  console.log(`EE V4       : completing ${thisEeId}, next will be ${nextEeId}`);
   console.log(`Insurance   : ${insuranceFund.toBase58().slice(0, 12)}…\n`);
 
   // ── Optional: register crank key as validator ──────────────────────────────
@@ -323,8 +320,104 @@ async function runRound() {
     }
   }
 
-  // ── Step 1+2: Advance round + create fee escrow (atomic) ──────────────────
-  console.log(`[1-2] Advance round → ${nextRound} + create fee escrow`);
+  // ── Helper: locate the actual EE round PDA on EE_V4 (coordinator unknown) ─
+  async function findEeRoundPubkey(eeId) {
+    const bs58 = require("bs58");
+    const accts = await conn.getProgramAccounts(EE_V4, {
+      filters: [{ dataSize: 838 }, { memcmp: { offset: 40, bytes: bs58.encode(u64le(eeId)) } }],
+    });
+    if (!accts.length) throw new Error(`Could not locate EE round account for id=${eeId}`);
+    return accts[0].pubkey;
+  }
+
+  // ── Step 1: Complete current round (finalize EE + aggregate + distribute) ──
+  // advance_round requires WrapperRound[currentRound].aggregated == true.
+  // We finalize + aggregate the current EE round BEFORE advancing.
+  console.log(`[1] Completing current round ${currentRound} / EE ${thisEeId}`);
+  const [curWrAddr] = wrapperPda(currentRound);
+  const curWrAcct   = await conn.getAccountInfo(curWrAddr);
+  const alreadyAggregated = curWrAcct && curWrAcct.data.length > 32 && curWrAcct.data[32] !== 0;
+
+  if (alreadyAggregated) {
+    console.log(`  ↳ WrapperRound[${currentRound}] already aggregated`);
+  } else {
+    // Wait for EE round thisEeId WrapperRound (created by validator daemon's init_ee_round)
+    console.log(`  Waiting for validator daemon to init EE round ${thisEeId}…`);
+    const [eeWrAddr] = wrapperPda(thisEeId);
+    let waited = false;
+    while (!await conn.getAccountInfo(eeWrAddr)) {
+      if (!waited) { process.stdout.write("  Polling"); waited = true; }
+      process.stdout.write(".");
+      await new Promise(r => setTimeout(r, 5000));
+    }
+    if (waited) console.log();
+    console.log(`  ↳ EE round ${thisEeId} initialized`);
+
+    const eeRoundPubkey1 = await findEeRoundPubkey(thisEeId);
+    console.log(`  EE round account: ${eeRoundPubkey1.toBase58().slice(0, 12)}…`);
+
+    // Read binding_slot and EE status
+    let bindingSlot1 = 0;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const a = await conn.getAccountInfo(eeRoundPubkey1);
+      if (a && a.data.length >= 74) { bindingSlot1 = Number(a.data.readBigUInt64LE(66)); if (bindingSlot1 > 0) break; }
+      await new Promise(r => setTimeout(r, 3000));
+    }
+    if (!bindingSlot1) throw new Error("Could not read binding_slot from EE round account");
+
+    let cur1 = await conn.getSlot("confirmed");
+    if (cur1 < bindingSlot1) {
+      const rem = bindingSlot1 - cur1;
+      console.log(`\n  Waiting ${rem} slots (~${Math.ceil(rem * 0.375)}s) for binding slot ${bindingSlot1}…`);
+      while (cur1 < bindingSlot1) {
+        await new Promise(r => setTimeout(r, 8000));
+        cur1 = await conn.getSlot("confirmed");
+        if (cur1 < bindingSlot1) process.stdout.write(`\r  slot ${cur1}/${bindingSlot1} — ${bindingSlot1 - cur1} remaining   `);
+      }
+      console.log(`\n  ✓ Binding slot reached`);
+    } else {
+      console.log(`  Binding slot already passed (slot ${cur1} > ${bindingSlot1})`);
+    }
+
+    // Check EE status before finalizing
+    const eeAcct1 = await conn.getAccountInfo(eeRoundPubkey1);
+    const eeStatus1 = eeAcct1.data[140];
+    if (eeStatus1 !== 2) {
+      console.log(`  [1a] finalize_via_ee (EE ${thisEeId})`);
+      for (let attempt = 0; attempt < 60; attempt++) {
+        try {
+          await send(ixFinalizeViaEe(thisEeId, eeRoundPubkey1), [payer], "finalize_via_ee");
+          break;
+        } catch (e) {
+          if (e.message?.includes("0x177d") || e.message?.includes("BindingSlot")) {
+            cur1 = await conn.getSlot("confirmed");
+            process.stdout.write(`\r  slot ${cur1}: still too early, retrying in 10s…`);
+            await new Promise(r => setTimeout(r, 10000));
+          } else { throw e; }
+        }
+      }
+    } else {
+      console.log(`  [1a] EE round ${thisEeId} already finalized`);
+    }
+
+    console.log(`  [1b] aggregate_from_ee (round ${currentRound})`);
+    await send(ixAggregateFromEe(currentRound, eeRoundPubkey1), [payer], "aggregate_from_ee");
+
+    console.log(`  [1c] distribute_fees (round ${currentRound})`);
+    try {
+      await send(ixDistributeFees(currentRound, insuranceFund), [payer], "distribute_fees");
+    } catch (e) {
+      if (e.message?.includes("FeeEscrowInsufficient") || e.message?.includes("0x177f")) {
+        console.log(`  ↳ No fees (no requests this round)`);
+      } else if (e.message?.includes("AlreadyDistributed")) {
+        console.log(`  ↳ Already distributed`);
+      } else { throw e; }
+    }
+  }
+
+  // ── Step 2: Advance to next round + create fee escrow ─────────────────────
+  // WrapperRound[currentRound].aggregated is now true — advance is unblocked.
+  console.log(`\n[2] Advance round → ${nextRound} + create fee escrow`);
   const [newWrAddr]  = wrapperPda(nextRound);
   const [escrowAddr] = escrowPda(nextRound);
   const needAdvance  = !await conn.getAccountInfo(newWrAddr);
@@ -338,53 +431,32 @@ async function runRound() {
     console.log(`  ↳ Already exists`);
   }
 
-  // ── Step 3: Wait for thisEeId WrapperRound (already created by a validator daemon) ──
-  // Validators call init_ee_round independently. eeV4RoundId is the round they just
-  // opened. The crank waits for that WrapperRound PDA then finalizes it.
-  console.log(`\n[3] Waiting for validator daemon to init EE round ${thisEeId}…`);
-  console.log(`    (Any registered validator running validator-daemon.js will call init_ee_round)`);
-  const [eeWrAddr] = wrapperPda(thisEeId);
-  let eeRoundPubkey = null;
-
+  // ── Step 3: Wait for next EE round (validators call init_ee_round(nextEeId)) ──
+  console.log(`\n[3] Waiting for validator daemon to init EE round ${nextEeId}…`);
+  const [nextEeWrAddr] = wrapperPda(nextEeId);
   {
-    let waited = false;
-    while (!await conn.getAccountInfo(eeWrAddr)) {
-      if (!waited) { process.stdout.write("  Polling"); waited = true; }
+    let waited2 = false;
+    while (!await conn.getAccountInfo(nextEeWrAddr)) {
+      if (!waited2) { process.stdout.write("  Polling"); waited2 = true; }
       process.stdout.write(".");
       await new Promise(r => setTimeout(r, 5000));
     }
-    if (waited) console.log();
-    console.log(`  ↳ EE round ${thisEeId} initialized by a validator daemon`);
+    if (waited2) console.log();
+    console.log(`  ↳ EE round ${nextEeId} initialized`);
   }
 
-  // Scan EE_V4 accounts to find the actual EE round pubkey (coordinator unknown)
-  {
-    const bs58 = require("bs58");
-    const roundIdBase58 = bs58.encode(u64le(thisEeId));
-    const eeAccounts = await conn.getProgramAccounts(EE_V4, {
-      filters: [
-        { dataSize: 838 },
-        { memcmp: { offset: 40, bytes: roundIdBase58 } },
-      ],
-    });
-    if (!eeAccounts.length) throw new Error(`Could not locate EE round account for id=${thisEeId}`);
-    eeRoundPubkey = eeAccounts[0].pubkey;
-    console.log(`  EE round account: ${eeRoundPubkey.toBase58().slice(0, 12)}…`);
-  }
+  const eeRoundPubkey = await findEeRoundPubkey(nextEeId);
+  console.log(`  EE round account: ${eeRoundPubkey.toBase58().slice(0, 12)}…`);
 
-  // ── Step 4: Read binding_slot from EE round account ───────────────────────
+  // ── Step 4: Read binding_slot ──────────────────────────────────────────────
   let bindingSlot = 0;
   for (let attempt = 0; attempt < 10; attempt++) {
-    const eeAcct = await conn.getAccountInfo(eeRoundPubkey);
-    if (eeAcct && eeAcct.data.length >= 74) {
-      bindingSlot = Number(eeAcct.data.readBigUInt64LE(66));
-      if (bindingSlot > 0) break;
-    }
+    const a = await conn.getAccountInfo(eeRoundPubkey);
+    if (a && a.data.length >= 74) { bindingSlot = Number(a.data.readBigUInt64LE(66)); if (bindingSlot > 0) break; }
     await new Promise(r => setTimeout(r, 3000));
   }
   if (!bindingSlot) throw new Error("Could not read binding_slot from EE round account");
-  console.log(`\n[4] Waiting for validators to commit (binding_slot=${bindingSlot})`);
-  console.log(`    Validators run validator-daemon independently — crank waits.`);
+  console.log(`\n[4] Waiting for validators to commit/reveal (binding_slot=${bindingSlot})`);
 
   // ── Step 5: Wait for binding slot ─────────────────────────────────────────
   let cur = await conn.getSlot("confirmed");
@@ -402,11 +474,11 @@ async function runRound() {
     console.log(`\n[5] Binding slot already passed`);
   }
 
-  // ── Step 6: Finalize ───────────────────────────────────────────────────────
-  console.log(`\n[6] finalize_via_ee (EE round ${thisEeId})`);
+  // ── Step 6: Finalize next EE round ────────────────────────────────────────
+  console.log(`\n[6] finalize_via_ee (EE round ${nextEeId})`);
   for (let attempt = 0; attempt < 60; attempt++) {
     try {
-      await send(ixFinalizeViaEe(thisEeId, eeRoundPubkey), [payer], "finalize_via_ee");
+      await send(ixFinalizeViaEe(nextEeId, eeRoundPubkey), [payer], "finalize_via_ee");
       break;
     } catch (e) {
       if (e.message?.includes("0x177d") || e.message?.includes("BindingSlot")) {
@@ -417,7 +489,7 @@ async function runRound() {
     }
   }
 
-  // ── Step 7: Aggregate ──────────────────────────────────────────────────────
+  // ── Step 7: Aggregate into protocol round nextRound ───────────────────────
   console.log(`\n[7] aggregate_from_ee (protocol round ${nextRound})`);
   await send(ixAggregateFromEe(nextRound, eeRoundPubkey), [payer], "aggregate_from_ee");
 
