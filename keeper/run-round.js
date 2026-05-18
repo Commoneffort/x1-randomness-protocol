@@ -430,7 +430,7 @@ async function runRound() {
     const lastAggSlot    = readU64(idlePoolData, 49);
     const nowSlot        = await conn.getSlot("confirmed");
     const slotsStale     = nowSlot - lastAggSlot;
-    const poolFresh      = poolAvailable && slotsStale < 1500;
+    const poolFresh      = poolAvailable && slotsStale < 21600;
     const pendingReqs    = await conn.getProgramAccounts(PROGRAM_ID, {
       filters: [
         { dataSize: 202 },

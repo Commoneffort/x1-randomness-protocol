@@ -124,7 +124,7 @@ async function shouldRunEeRound() {
   const lastAggSlot = readU64(poolData, 49);
   const nowSlot     = await conn.getSlot("confirmed");
   const slotsStale  = nowSlot - lastAggSlot;
-  const poolFresh   = available && slotsStale < 1500;
+  const poolFresh   = available && slotsStale < 21600;
   if (!poolFresh) return true;  // pool stale — must run
   const pending = await conn.getProgramAccounts(PROGRAM_ID, {
     filters: [
