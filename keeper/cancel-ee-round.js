@@ -36,8 +36,8 @@ function u64le(n) { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(n)); re
 async function main() {
   const bs58 = require("bs58");
 
-  // Find EE round 394864 (the stuck round)
-  const TARGET_EE_ID = 394864n;
+  // Find EE round 394871 (the stuck round)
+  const TARGET_EE_ID = 394871n;
   console.log(`Looking for EE round ${TARGET_EE_ID}…`);
 
   const accts = await conn.getProgramAccounts(EE_V4, {
