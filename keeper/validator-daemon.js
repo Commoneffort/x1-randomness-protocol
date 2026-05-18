@@ -453,9 +453,23 @@ async function runOnce() {
         } else {
           console.log(`  EE round ${eeV4RoundId} done (status=${eeStatus}) — opening next EE round ${nextEeId}`);
           try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status"); } catch (_) {}
-          const { ix } = ixInitEeRound(identity.publicKey, voteAccount, stakeAccount, nextEeId);
-          await send(ix, `init_ee_round(id=${nextEeId})`);
+          const { ix: initIx, eeRoundPubkey: newEeRoundPubkey } = ixInitEeRound(identity.publicKey, voteAccount, stakeAccount, nextEeId);
+          await send(initIx, `init_ee_round(id=${nextEeId})`);
           console.log(`  ✓ EE round ${nextEeId} opened — n=2, m=2, binding_slot=current+675`);
+          // Commit immediately — don't return and wait for the next poll, the
+          // 200-slot commit window (~75s) can expire before the daemon polls again.
+          const freshSecrets = { secret: crypto.randomBytes(32), nonce: crypto.randomBytes(32) };
+          saveSecrets(nextEeId, freshSecrets.secret, freshSecrets.nonce);
+          const freshCommitment = crypto.createHash("sha256")
+            .update(Buffer.concat([freshSecrets.secret, freshSecrets.nonce, identity.publicKey.toBuffer()]))
+            .digest();
+          try {
+            await send(ixCommit(nextEeId, newEeRoundPubkey, voteAccount, stakeAccount, freshCommitment), "commit_via_ee");
+            console.log(`  ✓ Committed to EE round ${nextEeId} immediately after init`);
+          } catch (commitErr) {
+            console.log(`  ⚠ Immediate commit failed: ${commitErr.message} — will retry next poll`);
+          }
+          return;
         }
       }
     } else {
@@ -464,7 +478,10 @@ async function runOnce() {
   }
 
   // ── Reveal phase ────────────────────────────────────────────────────────────
-  if (!beforeCommitDeadline && !revealed) {
+  // Only attempt reveal when the EE round is in RevealPhase (status=1).
+  // Cancelled (3) or CommitPhase-but-deadline-passed (0) rounds must not be revealed.
+  const eeRoundStatus = eeAcct.data[140];
+  if (!beforeCommitDeadline && !revealed && eeRoundStatus === 1) {
     const secrets = loadSecrets(eeV4RoundId);
     if (!secrets) {
       console.log("  Past binding slot but no secrets found — missed reveal window");
@@ -483,6 +500,12 @@ async function runOnce() {
 
   if (revealed) {
     console.log("  Already revealed this round");
+    clearSecrets();
+  }
+
+  // Clear stale secrets if round is cancelled or still in CommitPhase past deadline
+  if (!beforeCommitDeadline && !revealed && eeRoundStatus !== 1) {
+    console.log(`  EE round ${eeV4RoundId} status=${eeRoundStatus} — cannot reveal, clearing stale secrets`);
     clearSecrets();
   }
 

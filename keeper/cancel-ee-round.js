@@ -36,8 +36,8 @@ function u64le(n) { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(n)); re
 async function main() {
   const bs58 = require("bs58");
 
-  // Find EE round 394730 (the stuck round)
-  const TARGET_EE_ID = 394744n;
+  // Find EE round 394864 (the stuck round)
+  const TARGET_EE_ID = 394864n;
   console.log(`Looking for EE round ${TARGET_EE_ID}…`);
 
   const accts = await conn.getProgramAccounts(EE_V4, {
@@ -100,7 +100,7 @@ async function main() {
   console.log("\nSending cancel_round…");
   const sig = await sendAndConfirmTransaction(conn, tx, [identity], { commitment: "confirmed" });
   console.log("✓ cancel_round:", sig);
-  console.log("EE round 394730 cancelled — validator daemons will now open EE round 394731.");
+  console.log("EE round 394862 cancelled — validator daemons will now open EE round 394863.");
 }
 
 main().catch(e => { console.error("❌", e.message); process.exit(1); });
