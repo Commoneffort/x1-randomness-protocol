@@ -578,24 +578,48 @@ Both `finalize_via_ee` and `aggregate_from_ee` read the current slot hash from t
 `claim_validator_reward` sets `ValidatorReveal.claimed = true` and rejects if already set.
 
 ### Cross-Round Refund Protection
-`refund_request` verifies `fee_escrow.ee_v4_round_id` matches the EE round's stored ID. Requesters cannot claim refunds from a different round's escrow.
+`refund_request` requires `fee_escrow.ee_v4_round_id != 0` (escrow must be linked to an EE round by `aggregate_from_ee` before refunds are allowed) and verifies the passed EE round's stored ID matches that field. Requesters cannot drain escrow using a pre-linked or different round's cancelled EE account.
+
+### Claim Reward EE Round Binding
+`claim_validator_reward` reads the EE round ID at offset 40 from the passed EE round account and requires it equals `fee_escrow.ee_v4_round_id`. Prevents claiming from an escrow using an unrelated EE round to inflate or deflate `reveal_count`.
+
+### Finalization Status Guard
+`finalize_via_ee` explicitly checks `ee_data[140] == 2` (Finalized) after the CPI completes, in addition to CPI success. Guarantees the entropy output is from a legitimately finalized round.
 
 ### Liveness Protection
 If an EE V4 round is cancelled (status byte 140 == 3), `refund_request` lets requesters recover their fee. Validators who miss reveals forfeit their 0.01 XNT stake to the EE V4 slash pool.
 
 ### Staleness Hard Limit
-`request_randomness` rejects the fast path when pool entropy is older than 1,500 slots (~10 minutes), routing the request through the queue instead.
+`request_randomness` routes to the queue path (rather than failing) when pool entropy is older than `STALENESS_HARD_LIMIT_SLOTS` (21,600 slots ≈ 2.25 hours). The keepers' idle gate matches this threshold — they hold off opening a new EE round until the pool is stale OR a pending request appears, keeping costs low during quiet periods.
 
 ### Insurance Fund Separation
 `claim_validator_fees` (dust sweep) sends residual lamports to `insurance_fund`, not to the authority's personal wallet.
 
 ## Changelog
 
-### V4.3 (2026-05-17) — idle gate + frontend account list fixes
+### V4.3 (2026-05-18) — full security audit + fixes
 
-- **Idle gate** — crank (`run-round.js`) and validator daemon (`validator-daemon.js`) now check before opening any new EE round: if the entropy pool is warm (< 1500 slots stale) **and** there are zero unfulfilled `RequestState` accounts on-chain, they idle and poll again on the next tick instead of running a 4-minute EE commit/reveal cycle. Rounds resume automatically the moment the pool goes stale or a queued request appears.
-- **`request_randomness` account list corrected** — the `slot_hashes` sysvar (`SysvarS1otHashes111111111111111111111111111`) and the optional `dapp_registration` account (pass `SystemProgram` as opt-out) were missing from the frontend-built transaction. Both are now included at positions 6 and 7 respectively.
-- **`game_seed` account list corrected** — the `slot_hashes` sysvar was missing from the frontend-built transaction; added at position 4.
+**Program (deployed 2026-05-18, tx `ppA3RBfKsLuv3oscEnM5sjRap1QBXWKxTzgiV8JjUDEGyvvgyt85qMKKbb3Agjqw2ryp5jYcRPyyhjnoXyZrNz3`):**
+- **C-1: Explicit finalization status check** — `finalize_via_ee` now explicitly checks `ee_data[140] == 2` after CPI, removing reliance on all-zero entropy as a finalization proxy.
+- **C-2: Refund pre-link guard** — `refund_request` now requires `fee_escrow.ee_v4_round_id != 0`; refunds are blocked until `aggregate_from_ee` has linked the escrow to its EE round.
+- **H-2: Reward EE-round binding** — `claim_validator_reward` now reads the EE round's stored ID and requires it equals `fee_escrow.ee_v4_round_id`, preventing claims using an unrelated EE round account.
+
+**Validator daemon:**
+- **H-4: Commit idempotency** — removed `alreadyCommitted` flag. Daemon always re-attempts the commit transaction (on-chain idempotent); previously a dropped network tx left secrets on disk but the commit never landed, silently causing the reveal to fail later.
+- **M-4: Spurious account removed** — `ixClaimReward` no longer passes a redundant `SystemProgram.programId`; account list now matches `ClaimValidatorReward` exactly.
+- **M-9: Log corrected** — log after `init_ee_round` now says `n=2` (was `n=10`, an old constant).
+
+**Frontend:**
+- **C-2: `getProgramAccounts` filter encoding** — all three `memcmp.bytes` discriminator filters in `protocol.ts` used base64 encoding; Solana RPC requires base58. Validators and dApps pages were returning empty or unfiltered results.
+- **M-2: Connection churn** — dashboard `ProtocolClient` moved into `useState`; previously re-instantiated (new WebSocket) on every 3-second poll render.
+- **M-8: Fee escrow explorer link** — broken placeholder link in `rounds/page.tsx` replaced with a working link to the actual escrow PDA on X1 Explorer.
+- **Docs SDK example** — `wrapperRoundPda` in `docs/page.tsx` corrected to `isWritable: false`.
+
+**Earlier V4.3 changes (2026-05-17) — idle gate + account list fixes:**
+- **Idle gate** — crank and daemon check before opening any new EE round: if the entropy pool is warm (< 21,600 slots stale) **and** no unfulfilled `RequestState` accounts exist, they idle. Rounds resume automatically when pool goes stale or a request appears. Reduces crank cost from ~43 → ~3 XNT/month.
+- **`STALENESS_HARD_LIMIT_SLOTS` raised** — 1,500 → 21,600 slots (~2.25 hours) to match the idle gate.
+- **`request_randomness` account list corrected** — `slot_hashes` sysvar and optional `dapp_registration` added at positions 6 and 7.
+- **`game_seed` account list corrected** — `slot_hashes` sysvar added at position 4.
 
 ### V4.2 (2026-05-17) — security hardening
 

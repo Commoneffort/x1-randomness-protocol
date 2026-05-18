@@ -4,20 +4,20 @@ Guidance for Claude Code working in this repository.
 
 ## Build
 
-Always use the platform-tools flag — plain `anchor build` will fail:
+Use plain `anchor build` — the `--tools-version` flag is no longer supported by the installed `cargo-build-sbf` version and will fail:
 
 ```bash
-anchor build -- --tools-version v1.52
+anchor build
 ```
 
-IDL generation emits a version mismatch warning (anchor-lang 0.30.1 vs anchor-cli 0.31.0). The `.so` compiles correctly regardless; ignore the warning.
+IDL generation fails with an `anchor-syn` compile error (proc-macro API). This is expected and harmless — the `.so` compiles correctly in the same invocation; ignore the IDL error.
 
 ### Cargo.lock pins
 
 If `Cargo.lock` is regenerated for any reason, immediately re-pin:
 
 ```bash
-cargo update -p "proc-macro-crate" --precise 3.2.0
+cargo update -p "proc-macro-crate@3.2.0" --precise 3.2.0
 cargo update -p blake3 --precise 1.7.0
 ```
 
@@ -114,7 +114,7 @@ VALIDATOR_KEYPAIR=~/.config/solana/identity.json nohup node validator-daemon.js 
 VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --register
 ```
 
-**Idle gate (V4.3):** Both the crank and validator daemon check before opening any new EE round: if the entropy pool is warm (< 1 500 slots stale) AND there are no unfulfilled `RequestState` accounts on-chain, they idle and re-poll without sending any transactions. A round starts automatically when a queued request appears or the pool goes stale. Running both processes costs nothing when the protocol is idle.
+**Idle gate (V4.3):** Both the crank and validator daemon check before opening any new EE round: if the entropy pool is warm (< 21 600 slots stale) AND there are no unfulfilled `RequestState` accounts on-chain, they idle and re-poll without sending any transactions. A round starts automatically when a queued request appears or the pool goes stale. Running both processes costs nothing when the protocol is idle. The 21 600-slot threshold matches `STALENESS_HARD_LIMIT_SLOTS` and reduces crank cost from ~43 → ~3 XNT/month.
 
 **init_ee_round responsibility**: The validator daemon calls `init_ee_round` (NOT the crank). The daemon gates this call on the current EE round being Finalized (status=2) or Cancelled (status=3) — it will NOT advance to the next EE round while the current one is still in progress. The crank polls for the EE WrapperRound PDA in step 3 and waits for a validator daemon to create it.
 
@@ -129,7 +129,7 @@ VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --regi
 - **`fee_distributed` flag** — `distribute_fees` is idempotent. `claim_validator_reward` requires `fee_distributed == true`.
 - **`claim_validator_fees` (dust sweep)** — recipient restricted to `insurance_fund`, not authority personal wallet.
 - **`verify_entropy`** — requires a fulfilled `RequestState`. `derived_output` copied from stored value, not recomputed.
-- **Staleness hard limit** — `request_randomness` rejects pool entropy older than `STALENESS_HARD_LIMIT_SLOTS` (1 500 slots ≈ 10 minutes).
+- **Staleness hard limit** — pool entropy older than `STALENESS_HARD_LIMIT_SLOTS` (21 600 slots ≈ 2.25 hours) routes `request_randomness` to the queue path instead of the fast path. Matches the keeper idle gate threshold.
 - **`deliver_callback`** — requires a `caller: Signer` (permissionless crank but must sign).
 
 ## Architecture notes
