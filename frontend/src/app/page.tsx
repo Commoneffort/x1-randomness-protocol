@@ -137,7 +137,7 @@ export default function DashboardPage() {
         <StatCard
           title="Requests Served"
           value={pool?.totalRequestsServed.toLocaleString() ?? "—"}
-          sub="Total on-chain"
+          sub={`+${pool?.totalGameSeeds.toLocaleString() ?? "—"} game seeds`}
           icon={BoltIcon} accent="purple"
         />
         <StatCard

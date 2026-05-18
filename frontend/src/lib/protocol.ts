@@ -33,6 +33,7 @@ export interface EntropyPool {
   totalRequestsServed: number;
   eeV4EntropyIncluded: boolean;
   bump: number;
+  totalGameSeeds: number;
 }
 
 export interface WrapperRound {
@@ -166,6 +167,7 @@ export class ProtocolClient {
       totalRequestsServed:  readU64(d, 57),
       eeV4EntropyIncluded:  readBool(d, 65),
       bump:                 d[66],
+      totalGameSeeds:       d.length >= 75 ? readU64(d, 67) : 0,
     };
   }
 

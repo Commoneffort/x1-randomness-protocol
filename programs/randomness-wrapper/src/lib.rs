@@ -186,11 +186,12 @@ pub struct EntropyPool {
     pub entropy_available: bool,
     pub last_aggregated_slot: u64,
     pub total_requests_served: u64,
-    pub ee_v4_entropy_included: bool,  // Whether last aggregation included EE V4 entropy
+    pub ee_v4_entropy_included: bool,
     pub bump: u8,
+    pub total_game_seeds: u64,  // appended in V4.3 — offset 67, realloc on first game_seed call
 }
 impl EntropyPool {
-    pub const INIT_SPACE: usize = 8 + 32 + 8 + 1 + 8 + 8 + 1 + 1;
+    pub const INIT_SPACE: usize = 8 + 32 + 8 + 1 + 8 + 8 + 1 + 1 + 8;
 }
 
 #[account]
@@ -876,8 +877,12 @@ pub struct UnregisterAgent<'info> {
 #[derive(Accounts)]
 pub struct GameSeed<'info> {
     #[account(
+        mut,
         seeds = [b"entropy-pool"],
         bump = entropy_pool.bump,
+        realloc = EntropyPool::INIT_SPACE,
+        realloc::payer = payer,
+        realloc::zero = false,
     )]
     pub entropy_pool: Account<'info, EntropyPool>,
     #[account(
@@ -2107,8 +2112,7 @@ pub mod randomness_wrapper {
     }
 
     pub fn game_seed(ctx: Context<GameSeed>, game_id: [u8; 32]) -> Result<[u8; 32]> {
-        let pool = &ctx.accounts.entropy_pool;
-        require!(pool.entropy_available, RandomnessError::EntropyPoolNotAvailable);
+        require!(ctx.accounts.entropy_pool.entropy_available, RandomnessError::EntropyPoolNotAvailable);
 
         // Collect game seed fee into the current round's escrow.
         anchor_lang::system_program::transfer(
@@ -2126,12 +2130,19 @@ pub mod randomness_wrapper {
             .ok_or(error!(RandomnessError::Overflow))?;
 
         let slot_hash = read_slot_hash(&ctx.accounts.slot_hashes)?;
-        let mut preimage = Vec::with_capacity(128);
-        preimage.extend_from_slice(&pool.current_entropy);
-        preimage.extend_from_slice(&game_id);
-        preimage.extend_from_slice(ctx.accounts.payer.key.as_ref());
-        preimage.extend_from_slice(&slot_hash);
-        let output = hash(&preimage).to_bytes();
+        let output = {
+            let pool = &ctx.accounts.entropy_pool;
+            let mut preimage = Vec::with_capacity(128);
+            preimage.extend_from_slice(&pool.current_entropy);
+            preimage.extend_from_slice(&game_id);
+            preimage.extend_from_slice(ctx.accounts.payer.key.as_ref());
+            preimage.extend_from_slice(&slot_hash);
+            hash(&preimage).to_bytes()
+        };
+
+        let pool = &mut ctx.accounts.entropy_pool;
+        pool.total_game_seeds = pool.total_game_seeds
+            .checked_add(1).ok_or(error!(RandomnessError::Overflow))?;
 
         emit!(GameSeedEvent {
             game_id,
