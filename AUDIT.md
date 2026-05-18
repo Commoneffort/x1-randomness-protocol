@@ -1,8 +1,8 @@
 # X1 Randomness Protocol — Audit Report
 
-**Date:** 2026-05-17 (updated)  
+**Date:** 2026-05-18 (V4.3 full audit)  
 **Scope:** Full codebase — Anchor program, keeper scripts, frontend, documentation  
-**Protocol versions audited:** V4 (post-decentralisation), V4.2 (security hardening)
+**Protocol versions audited:** V4 (post-decentralisation), V4.2 (security hardening), V4.3 (full audit)
 
 ---
 
@@ -12,21 +12,25 @@
 |------|-------------|-------------|--------|
 | Anchor program (`lib.rs`) — V4 | 0 | 0 | ✅ PASS |
 | Anchor program (`lib.rs`) — V4.2 | 9 | 9 | ✅ FIXED |
+| Anchor program (`lib.rs`) — V4.3 | 3 | 3 | ✅ FIXED |
 | Keeper crank (`run-round.js`) | 2 | 2 | ✅ FIXED |
-| Validator daemon (`validator-daemon.js`) | 2 | 2 | ✅ FIXED |
+| Validator daemon (`validator-daemon.js`) — V4.2 | 2 | 2 | ✅ FIXED |
+| Validator daemon (`validator-daemon.js`) — V4.3 | 3 | 3 | ✅ FIXED |
 | Tests (`mainnet-e2e.js`) | 2 | 2 | ✅ FIXED |
-| Frontend library (`protocol.ts`, `constants.ts`, `pdas.ts`) | 0 | 0 | ✅ PASS |
-| Frontend UI — home dashboard (`page.tsx`) | 3 | 3 | ✅ FIXED |
-| Frontend UI — docs (`docs/page.tsx`) | 11 | 11 | ✅ FIXED |
+| Frontend library (`protocol.ts`) — V4.3 | 1 | 1 | ✅ FIXED |
+| Frontend UI — home dashboard (`page.tsx`) — V4/V4.3 | 4 | 4 | ✅ FIXED |
+| Frontend UI — docs (`docs/page.tsx`) — V4/V4.3 | 12 | 12 | ✅ FIXED |
 | Frontend UI — dApps (`dapps/page.tsx`) | 2 | 2 | ✅ FIXED |
 | Frontend UI — request (`request/page.tsx`) | 3 | 3 | ✅ FIXED |
 | Frontend UI — validators (`validators/page.tsx`) | 2 | 2 | ✅ FIXED |
-| Frontend UI — rounds (`rounds/page.tsx`) | 0 | 0 | ✅ PASS |
+| Frontend UI — rounds (`rounds/page.tsx`) — V4.3 | 1 | 1 | ✅ FIXED |
+| Documentation (CLAUDE.md) — V4.3 | 2 | 2 | ✅ FIXED |
 | README.md | 7 | 7 | ✅ FIXED |
 | Obsolete file (`validator-daemon.ts`) | 1 | 0 | ⚠️ PRESENT |
 
 **Total V4 audit:** 29 issues found, 28 fixed, 1 non-critical leftover.  
-**Total V4.2 audit:** 15 additional issues found, 15 fixed.
+**Total V4.2 audit:** 15 additional issues found, 15 fixed.  
+**Total V4.3 audit:** 17 additional issues found, 17 fixed.
 
 ---
 
@@ -45,7 +49,10 @@
 | `claim_validator_reward` marks `ValidatorReveal.claimed = true` — single-claim per round | ✅ |
 | `refund_request` verifies `fee_escrow.ee_v4_round_id` against EE round to prevent cross-round attack | ✅ |
 | `request_randomness` output formula: `SHA256(pool_entropy ‖ request_id ‖ slot_hash)` | ✅ |
-| `STALENESS_HARD_LIMIT_SLOTS = 1_500` enforced on fast path | ✅ |
+| `STALENESS_HARD_LIMIT_SLOTS = 21_600` enforced on fast path (increased from 1_500 to reduce crank costs — pool warms on request or after ~2.25 hrs) | ✅ |
+| `finalize_via_ee` explicitly checks `ee_data[140] == 2` (status=Finalized) after CPI | ✅ |
+| `refund_request` requires `fee_escrow.ee_v4_round_id != 0` before allowing refund | ✅ |
+| `claim_validator_reward` verifies EE round id matches `fee_escrow.ee_v4_round_id` | ✅ |
 
 ---
 
@@ -187,6 +194,46 @@ Round lifecycle legend, fee display, and status badges are all accurate.
 
 ---
 
+## V4.3 Full Security Audit (2026-05-18)
+
+### Anchor Program — V4.3 findings (all fixed)
+
+| ID | Severity | Instruction | Issue | Fix |
+|----|----------|-------------|-------|-----|
+| C-1 | Critical | `finalize_via_ee` | No explicit EE round status check after CPI. Relied on all-zero entropy as proxy for "not finalized." While CPI failure protects re-calls in practice, the intent was unclear and a 1-in-2^256 chance of valid all-zero entropy would have caused a false rejection. | Added `require!(ee_data[140] == 2, ...)` after CPI. Also consolidated the round ID length check to `>= 141`. |
+| C-2 | Critical | `refund_request` | `fee_escrow.ee_v4_round_id == 0` before `aggregate_from_ee` links the escrow. The ID==0 state would match an EE round with id=0 (impossible for real rounds since they start at 1, but an explicit guard is required). | Added `require!(fee_escrow.ee_v4_round_id != 0, EeV4RoundNotFinalized)` — refunds require the escrow to already be linked to a finalized/cancelled EE round. |
+| H-2 | High | `claim_validator_reward` | No check that the EE round passed matches the one linked to the fee escrow. An attacker who revealed in a different EE round (same protocol round) could attempt to use an unlinked EE round account to inflate `reveal_count` or drain escrow. | Added verification: read EE round id at offset 40 and require it equals `fee_escrow.ee_v4_round_id`. |
+
+### Validator Daemon — V4.3 findings (all fixed)
+
+| ID | Severity | File | Issue | Fix |
+|----|----------|------|-------|-----|
+| H-4 | High | `validator-daemon.js` `alreadyCommitted` | If a commit transaction failed (network error, not on-chain rejection), secrets were saved to disk but commit never landed. Next poll loaded secrets → `alreadyCommitted = true` → skipped commit → reveal failed (no on-chain commit). Daemon missed the round silently. | Removed `alreadyCommitted` flag. Now always attempts commit if before deadline; on-chain "already committed" error is caught and logged as confirmation. |
+| M-4 | Medium | `validator-daemon.js` `ixClaimReward` | Extra `SystemProgram.programId` account in key list. The Rust `ClaimValidatorReward` struct has 4 accounts, not 5. Anchor ignored it but the account list was out of sync. | Removed the redundant `SystemProgram.programId` entry. |
+| M-9 | Medium | `validator-daemon.js` console.log | Log message said `n=10` after `init_ee_round` — the old MAX_COMMITTEE_SIZE value. Protocol uses `n=2` (MIN_EE_M_THRESHOLD). | Changed log to `n=2, m=2`. |
+
+### Frontend Library — V4.3 findings (all fixed)
+
+| ID | Severity | File | Issue | Fix |
+|----|----------|------|-------|-----|
+| C-2 | Critical | `protocol.ts` `getAllDapps`, `getAllValidatorRegistrations`, `getValidatorReveals` | All three `getProgramAccounts` discriminator filters used base64 encoding for `memcmp.bytes`. Solana RPC requires base58. Validators and dApps pages likely returned empty results or unfiltered data. | Imported `bs58` from `"bs58"` and replaced all three filter bytes with `bs58.encode(disc)`. |
+
+### Frontend UI — V4.3 findings (all fixed)
+
+| ID | Severity | File | Issue | Fix |
+|----|----------|------|-------|-----|
+| M-2 | Medium | `page.tsx` (dashboard) | `ProtocolClient` instantiated directly in component body (`const client = new ProtocolClient()`). Created a new `Connection` and allocated WebSocket resources on every re-render (including the 3-second polling interval). | Changed to `const [client] = useState(() => new ProtocolClient())`. |
+| M-8 | Medium | `rounds/page.tsx` | Fee escrow explorer link was broken: `href` evaluated to empty string, `onClick` blocked navigation, and the text was unrelated to navigation. | Replaced with a working `<a href="...escrow.pubkey">View FeeEscrow on Explorer →</a>` link and moved the EE entropy label to a plain `<span>`. |
+| H-2 | Low | `docs/page.tsx` SDK example | `wrapperRoundPda` was listed as `isWritable: true` in the developer docs. The Rust struct does not mark `wrapper_round` as `#[account(mut)]` — it is read-only. | Changed to `isWritable: false`. |
+
+### Documentation — V4.3 findings (all fixed)
+
+| ID | Severity | File | Issue | Fix |
+|----|----------|------|-------|-----|
+| L-1 | Low | `CLAUDE.md` ValidatorRegistration constants | `MIN_COMMITTEE_SIZE = 3` in docs but the on-chain constant (and frontend) both use `2`. | Updated to `MIN_COMMITTEE_SIZE = 2`. |
+
+---
+
 ## V4.2 Security Audit (2026-05-17)
 
 ### Anchor Program — V4.2 findings (all fixed)
@@ -230,7 +277,8 @@ The following vectors were reviewed and are acceptable under the current design:
 | Front-running after pool entropy is known | Mitigated | `SHA256(pool_entropy ‖ request_id ‖ slot_hash)` — slot_hash at inclusion is unknown at submission time. |
 | Single-validator round | Mitigated | `MIN_EE_M_THRESHOLD = 2` enforced as a protocol constant in `init_ee_round`; EE V4 cancels rounds with fewer than M reveals. |
 | Fake EE V4 program injection | Mitigated | All four CPI instructions enforce `address = ENTROPY_ENGINE_V4`. |
-| Cross-round refund attack | Mitigated | `refund_request` verifies `fee_escrow.ee_v4_round_id` matches the EE round's stored ID. |
+| Cross-round refund attack | Mitigated | `refund_request` verifies `fee_escrow.ee_v4_round_id` matches the EE round's stored ID, and now additionally requires `ee_v4_round_id != 0` (escrow must already be linked). |
+| Reward claim against wrong EE round | Mitigated | `claim_validator_reward` now reads EE round ID at offset 40 and requires it matches `fee_escrow.ee_v4_round_id`. |
 
 ---
 

@@ -435,7 +435,7 @@ const ix = new TransactionInstruction({
     { pubkey: configPda,       isSigner: false, isWritable: false },
     { pubkey: poolPda,         isSigner: false, isWritable: true },
     { pubkey: escrowPda,       isSigner: false, isWritable: true },
-    { pubkey: wrapperRoundPda, isSigner: false, isWritable: true },
+    { pubkey: wrapperRoundPda, isSigner: false, isWritable: false },
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
   ],
   data,

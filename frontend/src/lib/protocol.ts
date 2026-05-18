@@ -1,4 +1,6 @@
 import { Connection, PublicKey, Commitment } from "@solana/web3.js";
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const bs58 = require("bs58") as { encode: (buf: Uint8Array | Buffer) => string };
 import { RPC_URL, SLOT_DURATION_MS, ACCT_DISC } from "./constants";
 import {
   findProtocolConfigPda,
@@ -54,6 +56,7 @@ export interface FeeEscrow {
   eeV4RoundId: number;     // EE V4 round that services this protocol round
   feeDistributed: boolean;
   bump: number;
+  pubkey: string;          // PDA base58
 }
 
 export interface DappRegistration {
@@ -196,6 +199,7 @@ export class ProtocolClient {
       eeV4RoundId:    readU64(d, 32),
       feeDistributed: readBool(d, 40),
       bump:           d[41],
+      pubkey:         pda.toBase58(),
     };
   }
 
@@ -228,7 +232,7 @@ export class ProtocolClient {
         new PublicKey(require("./constants").PROGRAM_ID),
         {
           commitment: "confirmed",
-          filters: [{ memcmp: { offset: 0, bytes: disc.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "") } }],
+          filters: [{ memcmp: { offset: 0, bytes: bs58.encode(disc) } }],
           dataSlice: undefined,
         }
       );
@@ -296,12 +300,11 @@ export class ProtocolClient {
   async getAllValidatorRegistrations(): Promise<ValidatorRegistration[]> {
     try {
       const disc = ACCT_DISC.ValidatorRegistration;
-      const b64 = disc.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
       const accounts = await this.connection.getProgramAccounts(
         new PublicKey(require("./constants").PROGRAM_ID),
         {
           commitment: "confirmed",
-          filters: [{ memcmp: { offset: 0, bytes: b64 } }],
+          filters: [{ memcmp: { offset: 0, bytes: bs58.encode(disc) } }],
         }
       );
       return accounts
@@ -320,7 +323,7 @@ export class ProtocolClient {
         {
           commitment: "confirmed",
           filters: [
-            { memcmp: { offset: 0, bytes: disc.toString("base64") } },
+            { memcmp: { offset: 0, bytes: bs58.encode(disc) } },
             { memcmp: { offset: 8, bytes: contributor.toBase58() } },
           ],
         }

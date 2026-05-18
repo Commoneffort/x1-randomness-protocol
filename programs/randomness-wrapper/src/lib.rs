@@ -1728,16 +1728,17 @@ pub mod randomness_wrapper {
         //   Actually let's read from the account data directly
         let ee_data = ctx.accounts.ee_round.try_borrow_data()?;
 
-        // Verify the round_id matches what we expect
-        if ee_data.len() >= 48 {
-            let mut ee_round_id_bytes = [0u8; 8];
-            ee_round_id_bytes.copy_from_slice(&ee_data[40..48]);
-            let ee_round_id = u64::from_le_bytes(ee_round_id_bytes);
-            require!(
-                ee_round_id == ctx.accounts.wrapper_round.ee_v4_round_id,
-                RandomnessError::InvalidEeV4RoundResult
-            );
-        }
+        // Verify round_id and status after successful CPI.
+        require!(ee_data.len() >= 141, RandomnessError::InvalidEeV4RoundResult);
+        let ee_round_id = u64::from_le_bytes(
+            ee_data[40..48].try_into().map_err(|_| error!(RandomnessError::InvalidEeV4RoundResult))?
+        );
+        require!(
+            ee_round_id == ctx.accounts.wrapper_round.ee_v4_round_id,
+            RandomnessError::InvalidEeV4RoundResult
+        );
+        // Explicit status check — CPI guarantees this but we verify defensively.
+        require!(ee_data[140] == 2, RandomnessError::EeV4RoundNotFinalized);
 
         let ee_entropy = extract_ee_entropy(&ee_data)?;
 
@@ -2200,6 +2201,19 @@ pub mod randomness_wrapper {
         let reveal_count = ee_data[75] as u64;
         require!(reveal_count > 0, RandomnessError::InvalidEeV4RoundResult);
 
+        // Verify this EE round is the one that served the protocol round in the fee escrow.
+        // Prevents a validator who revealed in a different (older) EE round for this same
+        // protocol round from draining the escrow.
+        require!(ee_data.len() >= 48, RandomnessError::InvalidEeV4RoundResult);
+        let ee_round_id_in_account = u64::from_le_bytes(
+            ee_data[40..48].try_into()
+                .map_err(|_| error!(RandomnessError::InvalidEeV4RoundResult))?
+        );
+        require!(
+            ee_round_id_in_account == ctx.accounts.fee_escrow.ee_v4_round_id,
+            RandomnessError::InvalidEeV4RoundResult
+        );
+
         let escrow = &mut ctx.accounts.fee_escrow;
         // Per-validator share = 90% of pre-insurance total / number of revealers.
         let validator_share = escrow.original_fees
@@ -2232,6 +2246,16 @@ pub mod randomness_wrapper {
         // Verify EE V4 round is Cancelled (status byte == 3 at offset 140)
         // and belongs to this protocol round's fee escrow.
         {
+            // Guard: escrow must be linked to an EE round before refunds are allowed.
+            // ee_v4_round_id is set by aggregate_from_ee; if 0, the round never completed
+            // and the correct flow is to wait or use a legitimate cancelled-round refund.
+            // A zero escrow id also means any EE round id == 0 would match, which is
+            // impossible for real rounds (they start at 1) but we reject it explicitly.
+            require!(
+                ctx.accounts.fee_escrow.ee_v4_round_id != 0,
+                RandomnessError::EeV4RoundNotFinalized
+            );
+
             let ee_data = ctx.accounts.ee_round.try_borrow_data()?;
             require!(ee_data.len() > 140, RandomnessError::InvalidEeV4RoundResult);
             let status = ee_data[140];

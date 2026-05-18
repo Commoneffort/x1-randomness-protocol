@@ -202,13 +202,16 @@ export default function RoundsPage() {
                       </a>
                       {escrow && (
                         <a
-                          href={`https://explorer.x1.xyz/address/${(typeof window !== "undefined" ? "" : "")}`}
-                          onClick={e => e.preventDefault()}
-                          className="text-xs text-text-muted cursor-default"
+                          href={`https://explorer.x1.xyz/address/${escrow.pubkey}`}
+                          target="_blank" rel="noopener noreferrer"
+                          className="text-xs text-primary hover:underline"
                         >
-                          Round {wr.round} · EE V4 entropy included: {wr.eeV4EntropyIncluded ? "yes" : "no"}
+                          View FeeEscrow on Explorer →
                         </a>
                       )}
+                      <span className="text-xs text-text-muted">
+                        EE V4 entropy included: {wr.eeV4EntropyIncluded ? "yes" : "no"}
+                      </span>
                     </div>
                   </div>
                 )}

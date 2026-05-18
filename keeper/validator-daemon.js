@@ -272,12 +272,11 @@ function ixClaimReward(eeRound, protocolRound, insuranceFund) {
   const [vr]     = vrPda(eeRound, identity.publicKey);
   return new TransactionInstruction({ programId: PROGRAM_ID,
     keys: [
-      { pubkey: identity.publicKey,      isSigner: true,  isWritable: true  },
-      { pubkey: vr,                      isSigner: false, isWritable: true  },
-      { pubkey: escrow,                  isSigner: false, isWritable: true  },
-      { pubkey: cfg,                     isSigner: false, isWritable: false },
-      { pubkey: eeRound,                 isSigner: false, isWritable: false },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: identity.publicKey, isSigner: true,  isWritable: true  },
+      { pubkey: vr,                 isSigner: false, isWritable: true  },
+      { pubkey: escrow,             isSigner: false, isWritable: true  },
+      { pubkey: cfg,                isSigner: false, isWritable: false },
+      { pubkey: eeRound,            isSigner: false, isWritable: false },
     ],
     data: disc("claim_validator_reward"),
   });
@@ -338,7 +337,7 @@ async function runOnce() {
     try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status"); } catch (_) {}
     const { ix } = ixInitEeRound(identity.publicKey, voteAccount, stakeAccount, eeV4RoundId);
     await send(ix, `init_ee_round(id=${eeV4RoundId})`);
-    console.log(`  ✓ n=10, m=2, binding_slot=current+675 (derived on-chain)`);
+    console.log(`  ✓ n=2, m=2, binding_slot=current+675 (derived on-chain)`);
   }
 
   let eeRoundPubkey = null;
@@ -395,37 +394,36 @@ async function runOnce() {
     }
 
     let secrets = loadSecrets(eeV4RoundId);
-    let alreadyCommitted = false;
 
     if (!secrets) {
       secrets = { secret: crypto.randomBytes(32), nonce: crypto.randomBytes(32) };
       saveSecrets(eeV4RoundId, secrets.secret, secrets.nonce);
       console.log("  Generated and persisted fresh secrets");
     } else {
-      console.log("  Loaded persisted secrets");
-      alreadyCommitted = true;
+      console.log("  Loaded persisted secrets — will re-attempt commit to confirm on-chain");
     }
 
-    if (!alreadyCommitted) {
-      const commitment = crypto.createHash("sha256")
-        .update(Buffer.concat([secrets.secret, secrets.nonce, identity.publicKey.toBuffer()]))
-        .digest();
-      try {
-        await send(ixCommit(eeV4RoundId, eeRoundPubkey, voteAccount, stakeAccount, commitment), "commit_via_ee");
-      } catch (e) {
-        if (e.message?.includes("already") || e.message?.includes("0x0")) {
-          console.log("  Already committed this round");
-        } else if (e.message?.includes("NotSelectedForRound")) {
-          console.log("  Selection check failed on-chain — not eligible this round");
-          clearSecrets();
-          return;
-        } else if (e.message?.includes("0x7d6") || e.message?.includes("ConstraintSeeds")) {
-          console.log("  Config advanced before commit landed — round changed mid-cycle, retrying next poll");
-          clearSecrets();
-          return;
-        } else {
-          throw e;
-        }
+    // Always attempt commit — the on-chain program is idempotent (returns "already committed"
+    // if we already committed). This prevents the failure mode where a network error drops
+    // the commit tx but leaves secrets on disk, causing the reveal to fail later.
+    const commitment = crypto.createHash("sha256")
+      .update(Buffer.concat([secrets.secret, secrets.nonce, identity.publicKey.toBuffer()]))
+      .digest();
+    try {
+      await send(ixCommit(eeV4RoundId, eeRoundPubkey, voteAccount, stakeAccount, commitment), "commit_via_ee");
+    } catch (e) {
+      if (e.message?.includes("already") || e.message?.includes("0x0")) {
+        console.log("  Already committed this round (on-chain confirmed)");
+      } else if (e.message?.includes("NotSelectedForRound")) {
+        console.log("  Selection check failed on-chain — not eligible this round");
+        clearSecrets();
+        return;
+      } else if (e.message?.includes("0x7d6") || e.message?.includes("ConstraintSeeds")) {
+        console.log("  Config advanced before commit landed — round changed mid-cycle, retrying next poll");
+        clearSecrets();
+        return;
+      } else {
+        throw e;
       }
     }
   }

@@ -76,7 +76,7 @@ export default function DashboardPage() {
   const [currentSlot, setCurrentSlot] = useState(0);
   const [loading, setLoading] = useState(true);
 
-  const client = new ProtocolClient();
+  const [client] = useState(() => new ProtocolClient());
 
   const fetchData = async () => {
     try {

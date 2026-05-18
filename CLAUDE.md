@@ -222,7 +222,7 @@ Seeds: `[b"val-reg", identity.key()]`
 | 137    | `active` (bool) |
 | 138    | `bump` (u8) |
 
-Constants: `MIN_VALIDATOR_STAKE = 1000 XNT`, `VALIDATOR_MAX_INACTIVE_SLOTS = 500`, `MIN_COMMITTEE_SIZE = 3`
+Constants: `MIN_VALIDATOR_STAKE = 1000 XNT`, `VALIDATOR_MAX_INACTIVE_SLOTS = 500`, `MIN_COMMITTEE_SIZE = 2`
 
 ### ValidatorReveal (82 bytes — added V3)
 
