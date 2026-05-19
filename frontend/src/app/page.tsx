@@ -9,8 +9,9 @@ import {
   CubeIcon,
   ShieldCheckIcon,
 } from "@heroicons/react/24/outline";
+import { Connection, PublicKey } from "@solana/web3.js";
 import { ProtocolClient, ProtocolConfig, EntropyPool } from "@/lib/protocol";
-import { REQUEST_FEE_LAMPORTS, GAME_SEED_FEE_LAMPORTS, SLOT_DURATION_MS, STALENESS_HARD_LIMIT_SLOTS } from "@/lib/constants";
+import { PROGRAM_ID, RPC_URL, REQUEST_FEE_LAMPORTS, GAME_SEED_FEE_LAMPORTS, SLOT_DURATION_MS, STALENESS_HARD_LIMIT_SLOTS, DISC } from "@/lib/constants";
 
 function StatCard({
   title, value, sub, icon: Icon, accent,
@@ -70,11 +71,49 @@ function PoolStatus({ pool, currentSlot }: { pool: EntropyPool; currentSlot: num
   );
 }
 
+async function fetchCrankRunners(): Promise<string[]> {
+  const conn = new Connection(RPC_URL, "confirmed");
+  const programId = new PublicKey(PROGRAM_ID);
+  const disc = DISC.distribute_fees;
+
+  const sigs = await conn.getSignaturesForAddress(programId, { limit: 300 });
+  if (!sigs.length) return [];
+
+  // Batch fetch in groups of 50
+  const seen = new Set<string>();
+  for (let i = 0; i < sigs.length; i += 50) {
+    const batch = sigs.slice(i, i + 50).map(s => s.signature);
+    const txs = await conn.getTransactions(batch, { maxSupportedTransactionVersion: 0 });
+    for (const tx of txs) {
+      if (!tx?.transaction) continue;
+      const msg = tx.transaction.message;
+      const instructions = "compiledInstructions" in msg
+        ? msg.compiledInstructions
+        : (msg as { instructions: { programIdIndex: number; accountKeyIndexes: number[]; data: Uint8Array }[] }).instructions;
+      const keys = tx.transaction.message.staticAccountKeys ?? tx.transaction.message.getAccountKeys?.().staticAccountKeys ?? [];
+
+      for (const ix of instructions) {
+        const data = ix.data instanceof Uint8Array ? ix.data : Uint8Array.from(Buffer.from(ix.data as string, "base64"));
+        if (data.length < 8) continue;
+        if (!disc.every((b, i) => data[i] === b)) continue;
+        // distribute_fees: account index 4 is crank (V4.4+). Only 6-account txs.
+        const accounts = "accountKeyIndexes" in ix ? ix.accountKeyIndexes : (ix as { accounts: number[] }).accounts;
+        if (accounts.length >= 5) {
+          const crankKey = keys[accounts[4]];
+          if (crankKey) seen.add(crankKey.toString());
+        }
+      }
+    }
+  }
+  return Array.from(seen);
+}
+
 export default function DashboardPage() {
   const [config, setConfig] = useState<ProtocolConfig | null>(null);
   const [pool, setPool] = useState<EntropyPool | null>(null);
   const [currentSlot, setCurrentSlot] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [crankRunners, setCrankRunners] = useState<string[]>([]);
 
   const [client] = useState(() => new ProtocolClient());
 
@@ -98,7 +137,12 @@ export default function DashboardPage() {
   useEffect(() => {
     fetchData();
     const iv = setInterval(fetchData, 3000);
-    return () => clearInterval(iv);
+    // Crank runners change rarely — fetch once on load, refresh every 2 min
+    fetchCrankRunners().then(setCrankRunners).catch(console.error);
+    const crankIv = setInterval(() => {
+      fetchCrankRunners().then(setCrankRunners).catch(console.error);
+    }, 120_000);
+    return () => { clearInterval(iv); clearInterval(crankIv); };
   }, []);
 
   if (loading) {
@@ -146,6 +190,35 @@ export default function DashboardPage() {
           sub="X1 mainnet"
           icon={ClockIcon} accent="blue"
         />
+      </div>
+
+      {/* Crank Runners */}
+      <div className="card">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-lg font-semibold text-text-primary">Crank Runners</h2>
+          <span className="text-xs text-text-muted">last 300 txs</span>
+        </div>
+        {crankRunners.length === 0 ? (
+          <p className="text-sm text-text-muted">Scanning recent transactions…</p>
+        ) : (
+          <div className="space-y-2">
+            <p className="text-sm text-text-secondary">
+              <span className="font-bold text-text-primary text-lg">{crankRunners.length}</span> unique wallet{crankRunners.length !== 1 ? "s" : ""} have called <code className="font-mono text-xs bg-surface-elevated px-1 rounded">distribute_fees</code> recently and earned the 5% crank reward.
+            </p>
+            <div className="space-y-1 mt-2">
+              {crankRunners.map(addr => (
+                <div key={addr} className="flex items-center gap-2 p-2 bg-surface-elevated rounded-lg">
+                  <span className="w-2 h-2 rounded-full bg-green-400 shrink-0" />
+                  <a
+                    href={`https://explorer.x1.xyz/address/${addr}`}
+                    target="_blank" rel="noopener noreferrer"
+                    className="font-mono text-xs text-primary hover:underline truncate"
+                  >{addr}</a>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Protocol Details */}

@@ -31,6 +31,7 @@ export const DISC = {
   game_seed:                Buffer.from([154,214,16,146,213,175,151,159]),
   set_fee:                  Buffer.from([18,154,24,18,237,214,19,80]),
   update_dapp_fee:          Buffer.from([170,224,111,179,148,124,31,81]),
+  distribute_fees:          Buffer.from([120,56,27,7,53,176,113,186]),
   claim_validator_reward:   Buffer.from([255,194,143,228,188,239,126,109]),
   refund_request:           Buffer.from([209,53,99,171,128,139,169,155]),
   advance_round:            Buffer.from([230,88,119,80,54,4,212,250]),
