@@ -4,7 +4,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { useX1Wallet, useConnection } from "@/lib/X1WalletContext";
 import { PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
 import { ProtocolClient } from "@/lib/protocol";
-import { PROGRAM_ID, REQUEST_FEE_LAMPORTS, GAME_SEED_FEE_LAMPORTS, DISC, SLOT_HASHES_SYSVAR } from "@/lib/constants";
+import { PROGRAM_ID, REQUEST_FEE_LAMPORTS, GAME_SEED_FEE_LAMPORTS, DISC, SLOT_HASHES_SYSVAR, STALENESS_HARD_LIMIT_SLOTS } from "@/lib/constants";
 import { findProtocolConfigPda, findRequestPda, findEntropyPoolPda, findFeeEscrowPda, findWrapperRoundPda } from "@/lib/pdas";
 import { BoltIcon, CubeIcon, CheckCircleIcon, XCircleIcon } from "@heroicons/react/24/outline";
 
@@ -236,8 +236,7 @@ export default function RequestPage() {
 
       {/* Pool status */}
       {(() => {
-        const STALENESS_HARD_LIMIT = 1_500;
-        const isStaleHard = poolSlotsStale > STALENESS_HARD_LIMIT;
+        const isStaleHard = poolSlotsStale > STALENESS_HARD_LIMIT_SLOTS;
         const isWarm = entropyAvailable && !isStaleHard;
         const color = isWarm ? "border-l-green-400" : isStaleHard ? "border-l-red-400" : "border-l-yellow-400";
         const dot = isWarm ? "bg-green-400 animate-pulse" : isStaleHard ? "bg-red-400" : "bg-yellow-400";
@@ -468,7 +467,7 @@ export default function RequestPage() {
                 </a>
               </div>
               <div className="p-3 bg-surface-elevated rounded-lg">
-                <p className="text-xs text-text-muted mb-1">Output — SHA256(pool_entropy ‖ game_id)</p>
+                <p className="text-xs text-text-muted mb-1">Output — SHA256(pool_entropy ‖ game_id ‖ payer ‖ slot_hash)</p>
                 <p className="font-mono text-xs text-text-primary break-all select-all bg-white p-2 rounded border border-border">
                   {gameSeedResult.output}
                 </p>
@@ -491,7 +490,7 @@ export default function RequestPage() {
                   {[
                     ["Fee", `${GAME_SEED_FEE_LAMPORTS / 1e9} XNT`, `${REQUEST_FEE_LAMPORTS / 1e9} XNT`],
                     ["Latency", "Instant (fast path only)", "Instant (warm) or ~4–10 min (queue)"],
-                    ["Verifiable output", "SHA256(pool_entropy ‖ game_id)", "SHA256(pool_entropy ‖ request_id ‖ slot_hash)"],
+                    ["Verifiable output", "SHA256(pool_entropy ‖ game_id ‖ payer ‖ slot_hash)", "SHA256(pool_entropy ‖ request_id ‖ slot_hash)"],
                     ["Use case", "In-game RNG, loot drops", "Lottery, NFT traits, auditable RNG"],
                     ["Requires warm pool", "Yes", "No (queues if cold)"],
                   ].map(([feat, gs, rr]) => (
