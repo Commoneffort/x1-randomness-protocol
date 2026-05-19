@@ -2,6 +2,44 @@ import { Connection, PublicKey, Commitment } from "@solana/web3.js";
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const bs58 = require("bs58") as { encode: (buf: Uint8Array | Buffer) => string };
 import { RPC_URL, SLOT_DURATION_MS, ACCT_DISC } from "./constants";
+
+// ── Rate-limit-aware fetch wrapper ────────────────────────────────────────────
+// web3.js does not read Retry-After or x-ratelimit-* headers on 429s — it just
+// doubles the timeout and retries. This wrapper reads those headers and waits the
+// correct amount before retrying, up to MAX_RETRIES times.
+
+const MAX_RETRIES = 4;
+
+async function rateLimitFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit
+): Promise<Response> {
+  let delay = 500; // fallback if no header
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const res = await fetch(input, init);
+    if (res.status !== 429) return res;
+
+    // Read the most specific header available
+    const retryAfterMs =
+      res.headers.get("x-ratelimit-reset-ms") ??
+      res.headers.get("x-ratelimit-reset");
+    const retryAfterSec = res.headers.get("retry-after");
+
+    if (retryAfterMs) {
+      const resetMs = Number(retryAfterMs);
+      delay = Number.isFinite(resetMs) ? Math.max(resetMs, 100) : delay;
+    } else if (retryAfterSec) {
+      const secs = Number(retryAfterSec);
+      delay = Number.isFinite(secs) ? Math.max(secs * 1000, 100) : delay;
+    }
+
+    if (attempt === MAX_RETRIES) return res; // let caller handle the final 429
+    await new Promise(r => setTimeout(r, delay));
+    delay = Math.min(delay * 2, 10_000); // cap backoff at 10s
+  }
+  // unreachable but satisfies TypeScript
+  return fetch(input, init);
+}
 import {
   findProtocolConfigPda,
   findEntropyPoolPda,
@@ -130,7 +168,10 @@ export class ProtocolClient {
   public connection: Connection;
 
   constructor() {
-    this.connection = new Connection(RPC_URL, "confirmed" as Commitment);
+    this.connection = new Connection(RPC_URL, {
+      commitment: "confirmed" as Commitment,
+      fetch: rateLimitFetch,
+    });
   }
 
   private async fetchRaw(pubkey: PublicKey): Promise<Buffer | null> {
@@ -249,14 +290,34 @@ export class ProtocolClient {
   async getAllWrapperRounds(limit = 15): Promise<WrapperRound[]> {
     const config = await this.getProtocolConfig();
     if (!config) return [];
-    const rounds: WrapperRound[] = [];
+    const roundNums: number[] = [];
     for (let i = 0; i < limit; i++) {
       const n = config.currentRound - i;
       if (n < 0) break;
-      const wr = await this.getWrapperRound(n);
-      if (wr) rounds.push(wr);
+      roundNums.push(n);
     }
-    return rounds;
+    // Fetch all PDAs in one RPC call instead of N sequential calls
+    const pdas = roundNums.map(n => findWrapperRoundPda(n)[0]);
+    const infos = await this.connection.getMultipleAccountsInfo(pdas, "confirmed");
+    return infos
+      .map((info, idx) => {
+        if (!info || info.data.length < 87) return null;
+        const d = Buffer.from(info.data);
+        return {
+          round:               readU64(d, 8),
+          eeV4RoundId:         readU64(d, 16),
+          startSlot:           readU64(d, 24),
+          aggregated:          readBool(d, 32),
+          aggregatedSlot:      readU64(d, 33),
+          entropyOutput:       readHex(d, 41, 32),
+          pendingRequests:     d.readUInt32LE(73),
+          totalFees:           readU64(d, 77),
+          eeV4EntropyIncluded: readBool(d, 85),
+          bump:                d[86],
+          pubkey:              pdas[idx].toBase58(),
+        } as WrapperRound;
+      })
+      .filter((wr): wr is WrapperRound => wr !== null);
   }
 
   async getRequestState(requestPda: PublicKey): Promise<RequestState | null> {

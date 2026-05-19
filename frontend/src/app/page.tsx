@@ -9,9 +9,9 @@ import {
   CubeIcon,
   ShieldCheckIcon,
 } from "@heroicons/react/24/outline";
-import { Connection, PublicKey } from "@solana/web3.js";
+import { PublicKey } from "@solana/web3.js";
 import { ProtocolClient, ProtocolConfig, EntropyPool } from "@/lib/protocol";
-import { PROGRAM_ID, RPC_URL, REQUEST_FEE_LAMPORTS, GAME_SEED_FEE_LAMPORTS, SLOT_DURATION_MS, STALENESS_HARD_LIMIT_SLOTS, DISC } from "@/lib/constants";
+import { PROGRAM_ID, REQUEST_FEE_LAMPORTS, GAME_SEED_FEE_LAMPORTS, SLOT_DURATION_MS, STALENESS_HARD_LIMIT_SLOTS, DISC } from "@/lib/constants";
 
 function StatCard({
   title, value, sub, icon: Icon, accent,
@@ -72,7 +72,9 @@ function PoolStatus({ pool, currentSlot }: { pool: EntropyPool; currentSlot: num
 }
 
 async function fetchCrankRunners(): Promise<string[]> {
-  const conn = new Connection(RPC_URL, "confirmed");
+  // Use ProtocolClient's connection so the rate-limit-aware fetch is applied
+  const client = new ProtocolClient();
+  const conn = client.connection;
   const programId = new PublicKey(PROGRAM_ID);
   const disc = DISC.distribute_fees;
 
