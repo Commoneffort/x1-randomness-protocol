@@ -638,6 +638,22 @@ const ix = new TransactionInstruction({
         <Section id="resources" title="Resources">
           <div className="space-y-2">
             <a
+              href="https://github.com/Commoneffort/x1-randomness-protocol"
+              target="_blank" rel="noopener noreferrer"
+              className="flex items-center gap-2 text-primary hover:underline"
+            >
+              <DocumentTextIcon className="h-4 w-4 shrink-0" />
+              X1 Randomness Protocol — GitHub (source, audit, changelog)
+            </a>
+            <a
+              href="https://github.com/jacklevin74/entropy-engine"
+              target="_blank" rel="noopener noreferrer"
+              className="flex items-center gap-2 text-primary hover:underline"
+            >
+              <DocumentTextIcon className="h-4 w-4 shrink-0" />
+              EntropyEngine V4 — GitHub (commit/reveal VDF source)
+            </a>
+            <a
               href={`https://explorer.x1.xyz/address/${PROGRAM_ID}`}
               target="_blank" rel="noopener noreferrer"
               className="flex items-center gap-2 text-primary hover:underline"
