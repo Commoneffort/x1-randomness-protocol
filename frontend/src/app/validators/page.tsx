@@ -187,7 +187,11 @@ export default function ValidatorsPage() {
     return `${Math.floor(secs / 3600)}h ago`;
   };
 
-  const isStale = (v: ValidatorRegistration) => currentSlot - v.lastActiveSlot > VALIDATOR_MAX_INACTIVE_SLOTS;
+  // isStale is a display hint only — VALIDATOR_MAX_INACTIVE_SLOTS is a commit-eligibility
+  // constraint, not a heartbeat. With the idle gate, validators go hundreds of slots between
+  // rounds. A validator is truly offline only when active === false (consecutive_misses >= 3).
+  const isStale = (v: ValidatorRegistration) =>
+    currentSlot - v.lastActiveSlot > VALIDATOR_MAX_INACTIVE_SLOTS && !v.active;
 
   return (
     <div className="space-y-6">
@@ -204,7 +208,7 @@ export default function ValidatorsPage() {
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
           {[
             { k: "Registered", v: allValidators.length.toString() },
-            { k: "Active", v: allValidators.filter(v => v.active && !isStale(v)).length.toString() },
+            { k: "Active", v: allValidators.filter(v => v.active).length.toString() },
             { k: "Min stake", v: `${MIN_VALIDATOR_STAKE_XNT.toLocaleString()} XNT` },
             { k: "Committee size", v: `≥ ${MIN_COMMITTEE_SIZE} per round` },
           ].map(({ k, v }) => (
@@ -237,7 +241,7 @@ export default function ValidatorsPage() {
               <tbody className="divide-y divide-border">
                 {allValidators.map(v => {
                   const stale = isStale(v);
-                  const online = v.active && !stale;
+                  const online = v.active;
                   return (
                     <tr key={v.identity} className="text-text-primary">
                       <td className="py-2 pr-4 font-mono text-xs">
@@ -286,7 +290,7 @@ export default function ValidatorsPage() {
                 <p>Vote:  {myReg.voteAccount.slice(0, 20)}…</p>
                 <p>Stake: {myReg.stakeAccount.slice(0, 20)}…</p>
                 <p>Verified stake: {(myReg.verifiedStake / 1e9).toLocaleString()} XNT</p>
-                <p>Status: {myReg.active ? (isStale(myReg) ? "⚠ stale — call refresh" : "✓ active") : "✗ inactive"}</p>
+                <p>Status: {myReg.active ? "✓ active" : "✗ inactive — call refresh_validator_status"}</p>
               </div>
             </div>
             {regSuccess && <div className="p-3 bg-green-50 rounded-lg text-green-700 text-sm">{regSuccess}</div>}
