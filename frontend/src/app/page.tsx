@@ -96,9 +96,10 @@ async function fetchCrankRunners(): Promise<string[]> {
         const data = ix.data instanceof Uint8Array ? ix.data : Uint8Array.from(Buffer.from(ix.data as string, "base64"));
         if (data.length < 8) continue;
         if (!disc.every((b, i) => data[i] === b)) continue;
-        // distribute_fees: account index 4 is crank (V4.4+). Only 6-account txs.
+        // distribute_fees V4.4+: 6 accounts, index 4 = crank signer.
+        // Pre-V4.4 had 5 accounts (no crank); index 4 was SystemProgram — skip those.
         const accounts = "accountKeyIndexes" in ix ? ix.accountKeyIndexes : (ix as { accounts: number[] }).accounts;
-        if (accounts.length >= 5) {
+        if (accounts.length >= 6) {
           const crankKey = keys[accounts[4]];
           if (crankKey) seen.add(crankKey.toString());
         }
