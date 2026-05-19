@@ -192,6 +192,23 @@ The 0.01 XNT commit stake is:
 | 152 | `fulfilled` (bool) |
 | 153–184 | `output` ([u8; 32]) |
 
+### EntropyPool (75 bytes — V4.3 appended `total_game_seeds`)
+
+Seeds: `[b"entropy-pool"]`
+
+| Offset | Field |
+|--------|-------|
+| 8–39   | `current_entropy` ([u8; 32]) |
+| 40–47  | `current_round` (u64) |
+| 48     | `entropy_available` (bool) |
+| 49–56  | `last_aggregated_slot` (u64) |
+| 57–64  | `total_requests_served` (u64) |
+| 65     | `ee_v4_entropy_included` (bool) |
+| 66     | `bump` (u8) |
+| 67–74  | `total_game_seeds` (u64) — appended V4.3; account was 67 bytes before migration |
+
+> **Note:** Existing accounts were 67 bytes until `migrate_entropy_pool` was called (mainnet: 2026-05-19). Any raw deserializer must check `data.len() >= 75` before reading offset 67.
+
 ### FeeEscrow (42 bytes — V3 added `original_fees`, security fixes added `ee_v4_round_id`)
 
 | Offset | Field |

@@ -597,6 +597,18 @@ If an EE V4 round is cancelled (status byte 140 == 3), `refund_request` lets req
 
 ## Changelog
 
+### V4.3 (2026-05-19) — game_seed counter + migration fix
+
+**Program (deployed 2026-05-19, tx `CQy7shPspPrnUj5N1bdp1F1b3JGmY2Zo7MN5SJov8pA9YZ37hp8bHxUW1rm4E2VhdUsYWCashzpZgGUpTGgx8CX`):**
+- **`total_game_seeds` counter** — `EntropyPool` gains a `u64` counter at offset 67 (INIT_SPACE 67→75). Incremented on every `game_seed` call.
+- **`migrate_entropy_pool` instruction** — permissionless, idempotent one-shot migration that expands existing 67-byte `EntropyPool` accounts to 75 bytes. Required after the struct change because Anchor deserializes before running the `realloc` constraint, causing `AccountDidNotDeserialize` on all `game_seed` calls until migration runs. Migration executed on mainnet: `3JGVn5q9gKyPQt4P7gapANrvwYgUesmBNGfwsjFg6RY1jxNE3AtAwAqyt4fqps3FE4r5JUGmzySC9yqCnBxa1Cv6`
+
+**Frontend:**
+- Dashboard shows `total_game_seeds` alongside `total_requests_served`.
+- `STALENESS_HARD_LIMIT_SLOTS` constant corrected to 21,600 in all three pages that used it (was hardcoded 1,500 in `request/page.tsx` and `validators/page.tsx`, causing false "Pool Stale" and "Offline" displays).
+- Validator status now uses `v.active` (on-chain field) not `lastActiveSlot > 500` as the online/offline signal.
+- Game seed preimage docs corrected: `SHA256(pool_entropy ‖ game_id ‖ payer ‖ slot_hash)`.
+
 ### V4.3 (2026-05-18) — full security audit + fixes
 
 **Program (deployed 2026-05-18, tx `ppA3RBfKsLuv3oscEnM5sjRap1QBXWKxTzgiV8JjUDEGyvvgyt85qMKKbb3Agjqw2ryp5jYcRPyyhjnoXyZrNz3`):**

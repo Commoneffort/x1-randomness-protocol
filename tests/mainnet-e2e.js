@@ -246,22 +246,27 @@ function buildRequestRandomness(requester, seed, callbackProgram, callbackIx, cu
   return new TransactionInstruction({
     programId: PROGRAM_ID,
     keys: [
-      { pubkey: reqPda,                 isSigner: false, isWritable: true },
-      { pubkey: requester.publicKey,    isSigner: true,  isWritable: true },
-      { pubkey: configPda,              isSigner: false, isWritable: false },
-      { pubkey: poolPda,                isSigner: false, isWritable: true },
-      { pubkey: escrowPda,              isSigner: false, isWritable: true },
-      { pubkey: roundPda,               isSigner: false, isWritable: false },
-      { pubkey: SystemProgram.programId,isSigner: false, isWritable: false },
+      { pubkey: reqPda,                   isSigner: false, isWritable: true  },
+      { pubkey: requester.publicKey,      isSigner: true,  isWritable: true  },
+      { pubkey: configPda,                isSigner: false, isWritable: false },
+      { pubkey: poolPda,                  isSigner: false, isWritable: true  },
+      { pubkey: escrowPda,                isSigner: false, isWritable: true  },
+      { pubkey: roundPda,                 isSigner: false, isWritable: false },
+      { pubkey: SYSVAR_SLOT_HASHES_PUBKEY,isSigner: false, isWritable: false },
+      // dapp_registration: pass SystemProgram as opt-out (no fee override)
+      { pubkey: SystemProgram.programId,  isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId,  isSigner: false, isWritable: false },
     ],
     data,
   });
 }
 
 function buildInitEeRound(coordinator, eeRoundId, nContributors, mThreshold, bindingSlot) {
-  const [configPda]    = protocolConfigPda();
-  const [wrPda]        = wrapperRoundPda(eeRoundId);
-  const [eeRound]      = eeRoundPda(coordinator.publicKey, eeRoundId);
+  const [configPda]       = protocolConfigPda();
+  const [wrPda]           = wrapperRoundPda(eeRoundId);
+  const [eeRound]         = eeRoundPda(coordinator.publicKey, eeRoundId);
+  // coordinator_reg PDA — may not exist if coordinator is not a registered validator
+  const [coordinatorReg]  = findPda([Buffer.from("val-reg"), coordinator.publicKey.toBuffer()]);
   const data = Buffer.concat([
     disc("init_ee_round"),
     u64le(eeRoundId),
@@ -272,10 +277,14 @@ function buildInitEeRound(coordinator, eeRoundId, nContributors, mThreshold, bin
   return { ix: new TransactionInstruction({
     programId: PROGRAM_ID,
     keys: [
-      { pubkey: configPda,              isSigner: false, isWritable: true },
-      { pubkey: wrPda,                  isSigner: false, isWritable: true },
-      { pubkey: eeRound,                isSigner: false, isWritable: true },
-      { pubkey: coordinator.publicKey,  isSigner: true,  isWritable: true },
+      { pubkey: configPda,              isSigner: false, isWritable: true  },
+      { pubkey: wrPda,                  isSigner: false, isWritable: true  },
+      { pubkey: eeRound,                isSigner: false, isWritable: true  },
+      { pubkey: coordinator.publicKey,  isSigner: true,  isWritable: true  },
+      { pubkey: coordinatorReg,         isSigner: false, isWritable: false },
+      // coordinator_vote and coordinator_stake are checked in handler; pass payer as dummy
+      { pubkey: coordinator.publicKey,  isSigner: false, isWritable: false },
+      { pubkey: coordinator.publicKey,  isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId,isSigner: false, isWritable: false },
       { pubkey: EE_V4,                  isSigner: false, isWritable: false },
     ],
@@ -348,11 +357,12 @@ function buildGameSeed(gameId, currentRound) {
   return new TransactionInstruction({
     programId: PROGRAM_ID,
     keys: [
-      { pubkey: poolPda,                 isSigner: false, isWritable: false },
-      { pubkey: configPda,               isSigner: false, isWritable: false },
-      { pubkey: escrowPda,               isSigner: false, isWritable: true },
-      { pubkey: payer.publicKey,         isSigner: true,  isWritable: true },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: poolPda,                    isSigner: false, isWritable: true  },
+      { pubkey: configPda,                  isSigner: false, isWritable: false },
+      { pubkey: escrowPda,                  isSigner: false, isWritable: true  },
+      { pubkey: payer.publicKey,            isSigner: true,  isWritable: true  },
+      { pubkey: SYSVAR_SLOT_HASHES_PUBKEY,  isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId,    isSigner: false, isWritable: false },
     ],
     data: Buffer.concat([disc("game_seed"), gameId]),
   });
