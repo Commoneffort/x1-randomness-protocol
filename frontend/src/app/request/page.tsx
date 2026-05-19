@@ -186,10 +186,10 @@ export default function RequestPage() {
       const tx = new Transaction().add(new TransactionInstruction({
         programId: new PublicKey(PROGRAM_ID),
         keys: [
-          { pubkey: poolPda,           isSigner: false, isWritable: false },
+          { pubkey: poolPda,           isSigner: false, isWritable: true  },
           { pubkey: configPda,         isSigner: false, isWritable: false },
-          { pubkey: escrowPda,         isSigner: false, isWritable: true },
-          { pubkey: publicKey,         isSigner: true,  isWritable: true },
+          { pubkey: escrowPda,         isSigner: false, isWritable: true  },
+          { pubkey: publicKey,         isSigner: true,  isWritable: true  },
           { pubkey: slotHashesPubkey,  isSigner: false, isWritable: false },
           { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
         ],
