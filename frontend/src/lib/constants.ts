@@ -15,7 +15,7 @@ export const EE_V4_STAKE_LAMPORTS         = 10_000_000;  // 0.01 XNT (returned o
 
 // Timing
 export const SLOT_DURATION_MS = 375;               // ~375ms per slot on X1 mainnet
-export const STALENESS_HARD_LIMIT_SLOTS = 1_500;   // ~10 min — pool considered dead past this
+export const STALENESS_HARD_LIMIT_SLOTS = 21_600;  // ~2.25 hr — matches Rust program constant and idle gate
 export const EE_V4_MIN_BINDING_SLOTS = 675;        // minimum binding slot offset
 
 // Fee distribution

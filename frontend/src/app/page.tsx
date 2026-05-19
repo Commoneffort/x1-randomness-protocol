@@ -160,7 +160,7 @@ export default function DashboardPage() {
             { label: "Game Seed Fee", value: `${GAME_SEED_FEE_LAMPORTS / 1e9} XNT` },
             { label: "Slot Duration", value: `${SLOT_DURATION_MS}ms (~2.67 slots/s)` },
             { label: "EE V4 Binding Delay", value: "~675 slots (~4.2 min)" },
-            { label: "Pool Staleness Limit", value: "1,500 slots (~10 min)" },
+            { label: "Pool Staleness Limit", value: "21,600 slots (~2.25 hr)" },
             { label: "Fee Split", value: "90% validators / 10% insurance" },
           ].map(({ label, value, mono }) => (
             <div key={label} className="p-3 bg-surface-elevated rounded-lg">
