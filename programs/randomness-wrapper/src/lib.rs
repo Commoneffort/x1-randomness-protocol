@@ -160,6 +160,10 @@ pub enum RandomnessError {
     StakeDeactivating,
     #[msg("Validator not selected for this round")]
     NotSelectedForRound,
+    #[msg("Account discriminator mismatch — wrong account at this address")]
+    AccountDiscriminatorMismatch,
+    #[msg("Account already migrated to current layout")]
+    AlreadyMigrated,
 }
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -901,6 +905,23 @@ pub struct GameSeed<'info> {
     /// CHECK: SlotHashes sysvar — prevents grinding game seeds by mixing in unpredictable state.
     #[account(address = anchor_lang::solana_program::sysvar::slot_hashes::ID)]
     pub slot_hashes: AccountInfo<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+/// One-time migration: expands the pre-V4.3 EntropyPool from 67 → 75 bytes to add
+/// the `total_game_seeds` counter. Permissionless and idempotent — safe to call twice.
+#[derive(Accounts)]
+pub struct MigrateEntropyPool<'info> {
+    #[account(
+        mut,
+        seeds = [b"entropy-pool"],
+        bump,
+    )]
+    /// CHECK: Pre-V4.3 account cannot be deserialized by Anchor as EntropyPool (67 vs 75 bytes).
+    /// Discriminator and size are verified in the handler; realloc is performed manually.
+    pub entropy_pool: UncheckedAccount<'info>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
     pub system_program: Program<'info, System>,
 }
 
@@ -2152,6 +2173,50 @@ pub mod randomness_wrapper {
         });
 
         Ok(output)
+    }
+
+    /// One-time migration: expands EntropyPool from 67 → 75 bytes (adds total_game_seeds).
+    /// Permissionless. Idempotent — returns AlreadyMigrated if already 75 bytes.
+    /// Must be called once before any game_seed call after the V4.3 upgrade.
+    pub fn migrate_entropy_pool(ctx: Context<MigrateEntropyPool>) -> Result<()> {
+        let pool_info = ctx.accounts.entropy_pool.to_account_info();
+        {
+            let data = pool_info.try_borrow_data()?;
+            require!(data.len() != EntropyPool::INIT_SPACE, RandomnessError::AlreadyMigrated);
+            require!(data.len() == 67, RandomnessError::InvalidEeV4RoundResult);
+            // EntropyPool discriminator: sha256("account:EntropyPool")[0..8]
+            require!(
+                data[0..8] == [27u8, 58, 82, 79, 166, 202, 159, 93],
+                RandomnessError::AccountDiscriminatorMismatch
+            );
+        }
+
+        // Fund the account for 8 extra bytes of rent-exemption.
+        let rent = Rent::get()?;
+        let extra_lamports = rent
+            .minimum_balance(EntropyPool::INIT_SPACE)
+            .saturating_sub(pool_info.lamports());
+        if extra_lamports > 0 {
+            anchor_lang::system_program::transfer(
+                CpiContext::new(
+                    ctx.accounts.system_program.to_account_info(),
+                    anchor_lang::system_program::Transfer {
+                        from: ctx.accounts.payer.to_account_info(),
+                        to: pool_info.clone(),
+                    },
+                ),
+                extra_lamports,
+            )?;
+        }
+
+        // Grow to 75 bytes; zero the new 8 bytes so total_game_seeds starts at 0.
+        pool_info.realloc(EntropyPool::INIT_SPACE, false)?;
+        let mut data = pool_info.try_borrow_mut_data()?;
+        for i in 67..EntropyPool::INIT_SPACE {
+            data[i] = 0;
+        }
+
+        Ok(())
     }
 
     pub fn verify_entropy(ctx: Context<VerifyEntropy>, request_id: [u8; 32]) -> Result<()> {
