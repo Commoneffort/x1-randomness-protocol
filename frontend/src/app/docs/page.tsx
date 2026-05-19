@@ -12,7 +12,7 @@ import {
   QuestionMarkCircleIcon,
   CurrencyDollarIcon,
 } from "@heroicons/react/24/outline";
-import { PROGRAM_ID, REQUEST_FEE_LAMPORTS, GAME_SEED_FEE_LAMPORTS, EE_V4_STAKE_LAMPORTS, FEE_VALIDATORS_PCT, FEE_INSURANCE_PCT, STALENESS_HARD_LIMIT_SLOTS } from "@/lib/constants";
+import { PROGRAM_ID, REQUEST_FEE_LAMPORTS, GAME_SEED_FEE_LAMPORTS, EE_V4_STAKE_LAMPORTS, FEE_VALIDATORS_PCT, FEE_INSURANCE_PCT, FEE_CRANK_PCT, STALENESS_HARD_LIMIT_SLOTS } from "@/lib/constants";
 
 function Section({ id, title, children }: { id: string; title: string; children: React.ReactNode }) {
   return (
@@ -128,7 +128,7 @@ export default function DocsPage() {
               { n: "1", color: "bg-blue-50 border-blue-200", label: "commit_via_ee", desc: "Validators stake 0.01 XNT and submit a hashed secret before commit_deadline (~200 slots after round init). Currently n=2 validators per round (grows with validator set; EE V4 max is 10)." },
               { n: "2", color: "bg-yellow-50 border-yellow-200", label: "reveal_via_ee", desc: "After commit_deadline (~200 slots) and before reveal_deadline (~600 slots), validators reveal their secret. This creates a ValidatorReveal PDA recording participation. The 0.01 XNT stake is returned on valid reveal." },
               { n: "3", color: "bg-green-50 border-green-200", label: "finalize_via_ee + aggregate_from_ee", desc: "Any signer calls finalize_via_ee to mark the EE V4 round done, then aggregate_from_ee to mix entropy into the pool: SHA256(ee_output ‖ slot_hash). Both are permissionless cranks. EntropyPool is now warm." },
-              { n: "4", color: "bg-purple-50 border-purple-200", label: "distribute_fees", desc: "Permissionless crank. Takes 10% insurance cut, records original_fees on the FeeEscrow, marks fee_distributed = true. Validators can now claim their share." },
+              { n: "4", color: "bg-purple-50 border-purple-200", label: "distribute_fees", desc: "Permissionless crank. Pays 5% to the crank caller, 5% to insurance fund, records original_fees on FeeEscrow, marks fee_distributed = true. Validators can now claim their 90% share." },
               { n: "5", color: "bg-orange-50 border-orange-200", label: "claim_validator_reward", desc: "Each validator calls this once per round to receive: original_fees × 90% ÷ reveal_count. Requires the ValidatorReveal PDA created at reveal time." },
             ].map(({ n, color, label, desc }) => (
               <div key={n} className={`flex gap-4 p-3 rounded-lg border ${color}`}>
@@ -165,7 +165,7 @@ export default function DocsPage() {
                   ["aggregate_from_ee", "Mix EE V4 entropy + SlotHash into EntropyPool", "Anyone (permissionless)"],
                   ["request_randomness", `Request entropy output (${REQUEST_FEE_LAMPORTS / 1e9} XNT standard fee; premium dApps pay more)`, "Any wallet / dApp"],
                   ["game_seed", `Fast cheap seed from pool (${GAME_SEED_FEE_LAMPORTS / 1e9} XNT fee, warm pool only). Fee flows to validators.`, "Any wallet"],
-                  ["distribute_fees", "Take 10% insurance cut; enable validator claims", "Anyone (permissionless)"],
+                  ["distribute_fees", "Pay 5% to crank caller + 5% insurance; enable validator claims", "Anyone (permissionless, earns 5%)"],
                   ["claim_validator_reward", "Claim per-validator share from FeeEscrow", "Validator"],
                   ["deliver_callback", "CPI-call the dApp's callback program with entropy output", "Keeper/crank (must sign)"],
                   ["register_dapp", "Register dApp PDA for callbacks", "Any wallet"],
@@ -370,6 +370,7 @@ export default function DocsPage() {
               { label: "Game seed fee", value: `${GAME_SEED_FEE_LAMPORTS / 1e9} XNT — flows to validators just like request fees` },
               { label: "EE V4 commit stake", value: `${EE_V4_STAKE_LAMPORTS / 1e9} XNT (returned on valid reveal)` },
               { label: "Validator share", value: `${FEE_VALIDATORS_PCT}% of round fees ÷ reveal_count` },
+              { label: "Crank reward", value: `${FEE_CRANK_PCT}% to distribute_fees caller (V4.4)` },
               { label: "Insurance fund", value: `${FEE_INSURANCE_PCT}% via distribute_fees` },
             ].map(({ label, value }) => (
               <div key={label} className="p-3 bg-surface-elevated rounded-lg border border-border">
@@ -381,8 +382,9 @@ export default function DocsPage() {
           <p className="mt-2">
             <strong className="text-text-primary">All fees — both randomness requests and game seeds — flow into the FeeEscrow PDA</strong> for the current round.
             After <Code>distribute_fees</Code> runs, <Code>original_fees</Code> is recorded and <Code>fee_distributed = true</Code>.
+            The crank caller receives 5% immediately; 5% goes to the insurance fund.
             Each validator who called <Code>reveal_via_ee</Code> in that round can then call <Code>claim_validator_reward</Code>{" "}
-            to receive <Code>original_fees × 90% ÷ reveal_count</Code>. The remaining 10% goes to the insurance fund.
+            to receive <Code>original_fees × 90% ÷ reveal_count</Code>.
           </p>
         </Section>
 
@@ -474,7 +476,7 @@ const ix = new TransactionInstruction({
               { n: "2", title: "Commit", body: `Call commit_via_ee(SHA256(secret || nonce || pubkey)) before commit_deadline (~200 slots). Stake ${EE_V4_STAKE_LAMPORTS / 1e9} XNT. Currently n=2 validators per round (EE V4 max is 10).` },
               { n: "3", title: "Reveal", body: "After commit_deadline (~200 slots) and before reveal_deadline (~600 slots / ~3.75 min), call reveal_via_ee(secret, nonce). Stake is returned. Creates a ValidatorReveal PDA for fee claiming." },
               { n: "4", title: "Finalize + aggregate", body: "Call finalize_via_ee (permissionless), then aggregate_from_ee. Pool is now warm — queued requests are fulfilled." },
-              { n: "5", title: "Claim reward", body: "Call distribute_fees (permissionless), then claim_validator_reward. Receive original_fees × 90% ÷ reveal_count." },
+              { n: "5", title: "Claim reward", body: "Call distribute_fees (permissionless — crank runner earns 5%), then claim_validator_reward. Receive original_fees × 90% ÷ reveal_count." },
             ].map(({ n, title, body }) => (
               <div key={n} className="flex gap-3 p-3 bg-surface-elevated rounded-lg border border-border">
                 <div className="w-6 h-6 rounded-full bg-primary/10 text-primary font-bold text-xs flex items-center justify-center shrink-0 mt-0.5">{n}</div>

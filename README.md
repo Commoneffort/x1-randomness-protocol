@@ -597,6 +597,19 @@ If an EE V4 round is cancelled (status byte 140 == 3), `refund_request` lets req
 
 ## Changelog
 
+### V4.4 (2026-05-19) — crank rewards + dApp request counters
+
+**Program (deployed 2026-05-19, tx `2HHE1kpjbCaAGLyuKzf6maNt9MucCyrenjQU8efkinsekTdR2MJhp5geLKrBe5PqB2rrSfuuV7RVCN3nwELs5H4x`):**
+- **Crank reward** — `distribute_fees` now pays 5% of round fees immediately to the caller (`crank: Signer` account). Insurance fund share reduced from 10% → 5%. Validator share unchanged at 90%. Any wallet running `run-round.js` earns this reward automatically.
+- **dApp request counters** — `request_randomness` now increments `DappRegistration.total_requests` and updates `last_served_round` when the dApp account is passed as writable. Previously these fields were never written. Pass the dApp registration as `isWritable: true` to enable tracking.
+
+**Frontend:**
+- Fee split updated to 90% / 5% / 5% across all pages (home, request, dapps, rounds, docs, validators).
+- `FEE_CRANK_PCT = 5` added to `constants.ts`.
+
+**Crank JS (`run-round.js`):**
+- `ixDistributeFees` now includes `payer` as `isSigner: true, isWritable: true` to receive the 5% crank reward.
+
 ### V4.3 (2026-05-19) — game_seed counter + migration fix
 
 **Program (deployed 2026-05-19, tx `CQy7shPspPrnUj5N1bdp1F1b3JGmY2Zo7MN5SJov8pA9YZ37hp8bHxUW1rm4E2VhdUsYWCashzpZgGUpTGgx8CX`):**

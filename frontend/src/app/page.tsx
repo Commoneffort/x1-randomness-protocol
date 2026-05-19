@@ -161,7 +161,7 @@ export default function DashboardPage() {
             { label: "Slot Duration", value: `${SLOT_DURATION_MS}ms (~2.67 slots/s)` },
             { label: "EE V4 Binding Delay", value: "~675 slots (~4.2 min)" },
             { label: "Pool Staleness Limit", value: "21,600 slots (~2.25 hr)" },
-            { label: "Fee Split", value: "90% validators / 10% insurance" },
+            { label: "Fee Split", value: "90% validators / 5% crank / 5% insurance" },
           ].map(({ label, value, mono }) => (
             <div key={label} className="p-3 bg-surface-elevated rounded-lg">
               <p className="text-xs text-text-muted">{label}</p>
@@ -211,7 +211,7 @@ export default function DashboardPage() {
           {[
             { icon: ShieldCheckIcon, title: "Fully Permissionless", desc: "No keeper authority. advance_round, finalize_via_ee, aggregate_from_ee, and distribute_fees are all open cranks any wallet can call." },
             { icon: BoltIcon, title: "On-Chain Validator Selection", desc: "commit_via_ee eligibility is derived from pool entropy — no external actor can control who participates in a round." },
-            { icon: CubeIcon, title: "Per-Validator Rewards", desc: "Both request fees and game seed fees flow to validators. 90% split by reveal_count via claim_validator_reward; 10% to insurance." },
+            { icon: CubeIcon, title: "Per-Validator Rewards", desc: "Both request fees and game seed fees flow to validators. 90% split by reveal_count via claim_validator_reward; 5% to crank runner; 5% to insurance." },
             { icon: CheckCircleIcon, title: "Liveness Protection", desc: "refund_request lets users recover fees if an EE V4 round is cancelled. Validators who miss reveals forfeit their 0.01 XNT stake." },
           ].map(({ icon: Icon, title, desc }) => (
             <div key={title} className="flex gap-3 p-3 bg-surface-elevated rounded-lg">

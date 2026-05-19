@@ -795,12 +795,15 @@ pub struct DistributeFees<'info> {
         bump = fee_escrow.bump,
     )]
     pub fee_escrow: Account<'info, FeeEscrow>,
-    /// CHECK: Insurance fund receives 10%
+    /// CHECK: Insurance fund receives 5% — permissionless but constrained to protocol address.
     #[account(
         mut,
         constraint = insurance_fund.key() == protocol_config.insurance_fund,
     )]
     pub insurance_fund: AccountInfo<'info>,
+    /// Crank runner receives 5% reward for calling this instruction.
+    #[account(mut)]
+    pub crank: Signer<'info>,
     pub system_program: Program<'info, System>,
 }
 
@@ -1194,6 +1197,23 @@ pub mod randomness_wrapper {
             ),
             fee,
         )?;
+
+        // Update per-dApp counters if a real (writable) dApp registration was passed.
+        {
+            let dapp_info = &ctx.accounts.dapp_registration;
+            if dapp_info.key() != System::id() && !dapp_info.data_is_empty() && dapp_info.is_writable {
+                let current_round = ctx.accounts.protocol_config.current_round;
+                let mut data = dapp_info.try_borrow_mut_data()?;
+                // last_served_round at offset 88
+                let last_served = u64::from_le_bytes(data[88..96].try_into().unwrap());
+                let _ = last_served; // read to confirm layout; overwrite below
+                data[88..96].copy_from_slice(&current_round.to_le_bytes());
+                // total_requests at offset 96
+                let total = u64::from_le_bytes(data[96..104].try_into().unwrap());
+                let new_total = total.saturating_add(1);
+                data[96..104].copy_from_slice(&new_total.to_le_bytes());
+            }
+        }
 
         let current_slot = Clock::get()?.slot;
 
@@ -2032,7 +2052,7 @@ pub mod randomness_wrapper {
     pub fn distribute_fees(ctx: Context<DistributeFees>) -> Result<()> {
         let escrow = &mut ctx.accounts.fee_escrow;
 
-        // One-shot: prevents repeatedly calling this to drain more than 10% to insurance.
+        // One-shot: prevents repeatedly calling this to drain more than 10% to crank+insurance.
         require!(!escrow.fee_distributed, RandomnessError::RoundAlreadyAggregated);
 
         let total_fees = escrow.pending_fees;
@@ -2041,17 +2061,24 @@ pub mod randomness_wrapper {
         // Snapshot original_fees before any cuts — validators use this for their share calc.
         escrow.original_fees = total_fees;
 
-        // 10% to insurance fund (one-time, never re-enterable)
+        // 5% to insurance fund, 5% to crank runner (one-time, never re-enterable)
         let insurance_share = total_fees
-            .checked_mul(10)
+            .checked_mul(5)
             .ok_or(error!(RandomnessError::Overflow))? / 100;
+        let crank_share = total_fees
+            .checked_mul(5)
+            .ok_or(error!(RandomnessError::Overflow))? / 100;
+        let total_cut = insurance_share
+            .checked_add(crank_share)
+            .ok_or(error!(RandomnessError::Overflow))?;
 
-        **escrow.to_account_info().try_borrow_mut_lamports()? -= insurance_share;
+        **escrow.to_account_info().try_borrow_mut_lamports()? -= total_cut;
         **ctx.accounts.insurance_fund.try_borrow_mut_lamports()? += insurance_share;
+        **ctx.accounts.crank.try_borrow_mut_lamports()? += crank_share;
 
         // 90% stays in escrow for validators — mark as distributed so claim is now unlocked.
         escrow.pending_fees = total_fees
-            .checked_sub(insurance_share)
+            .checked_sub(total_cut)
             .ok_or(error!(RandomnessError::Overflow))?;
         escrow.fee_distributed = true;
 

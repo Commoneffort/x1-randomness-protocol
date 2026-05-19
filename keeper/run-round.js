@@ -273,6 +273,7 @@ function ixDistributeFees(round, insuranceFund) {
       { pubkey: wr,                      isSigner: false, isWritable: false },
       { pubkey: escrow,                  isSigner: false, isWritable: true },
       { pubkey: insuranceFund,           isSigner: false, isWritable: true },
+      { pubkey: payer.publicKey,         isSigner: true,  isWritable: true  },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
     data: disc("distribute_fees"),

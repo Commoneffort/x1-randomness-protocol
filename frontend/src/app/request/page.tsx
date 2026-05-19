@@ -384,7 +384,7 @@ export default function RequestPage() {
             <div className="space-y-2 text-sm text-text-secondary">
               {[
                 ["1", "Generate a 32-byte seed. This personalizes your random output — two requests with the same round entropy but different seeds get different outputs."],
-                ["2", `Pay ${REQUEST_FEE_LAMPORTS / 1e9} XNT. Fees go into the round's FeeEscrow and are distributed 90% to validators / 10% insurance after the round.`],
+                ["2", `Pay ${REQUEST_FEE_LAMPORTS / 1e9} XNT. Fees go into the round's FeeEscrow and are distributed 90% to validators / 5% to crank runner / 5% insurance after the round.`],
                 ["3", "If the pool is warm (fast path), your output is derived from existing pool entropy immediately. Otherwise, the request queues for the next EE V4 round."],
                 ["4", "Output: SHA256(pool_entropy ‖ request_id ‖ slot_hash) — the slot hash is unknown at submission time, making outputs unpredictable even with known pool entropy. Deterministic and verifiable on-chain."],
               ].map(([n, text]) => (

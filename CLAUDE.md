@@ -308,7 +308,10 @@ Full field layout (Borsh/Anchor, no padding):
 | Premium request fee | 0.05 XNT (high-volume dApps — set via `update_dapp_fee`) |
 | Game seed fee | 0.001 XNT |
 | EE V4 stake | 0.01 XNT (fully returned on valid reveal) |
-| Insurance fund | 10% of round fees via `distribute_fees` |
+| Crank reward | 5% to `distribute_fees` caller (V4.4) — paid immediately from FeeEscrow |
+| Insurance fund | 5% of round fees via `distribute_fees` (was 10% before V4.4) |
 | Validator share | 90% ÷ reveal_count via `claim_validator_reward` |
 
 Premium tier is set by the protocol authority calling `update_dapp_fee` after a dApp registers. Validators earn more per round from premium dApps, directly incentivising liveness for high-value use cases.
+
+**Crank reward (V4.4):** `distribute_fees` now pays 5% of `original_fees` immediately to the caller (`crank` account in the Accounts struct). Any wallet running `run-round.js` earns this reward. The `crank` account must be a `Signer` with `isWritable: true` — the program transfers lamports directly from the FeeEscrow. No extra PDA or claim step needed.
