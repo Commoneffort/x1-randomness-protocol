@@ -175,6 +175,7 @@ export default function DocsPage() {
                   ["refund_request", "Refund fee if EE V4 round was cancelled (status = 3)", "Requester"],
                   ["close_request", "Close fulfilled RequestState PDA and reclaim rent", "Requester"],
                   ["verify_entropy", "Verify a fulfilled RequestState's output matches receipt", "Anyone"],
+                  ["migrate_entropy_pool", "One-time V4.3 migration: expands EntropyPool from 67→75 bytes to add total_game_seeds counter. Idempotent.", "Anyone (permissionless)"],
                 ].map(([instr, desc, who]) => (
                   <tr key={instr} className="border-b border-border/50 hover:bg-surface-elevated/50">
                     <td className="py-2 px-3 font-mono text-primary">{instr}</td>
@@ -208,7 +209,7 @@ export default function DocsPage() {
               },
               {
                 name: "EntropyPool",
-                size: "67 bytes",
+                size: "75 bytes (67 before V4.3 migration)",
                 fields: [
                   ["8–39", "current_entropy", "[u8; 32] (hex)"],
                   ["40–47", "current_round", "u64"],
@@ -217,6 +218,7 @@ export default function DocsPage() {
                   ["57–64", "total_requests_served", "u64"],
                   ["65", "ee_v4_entropy_included", "bool"],
                   ["66", "bump", "u8"],
+                  ["67–74", "total_game_seeds", "u64 — appended V4.3; check data.length >= 75 before reading"],
                 ],
               },
               {
@@ -427,16 +429,21 @@ const callbackProgram = new PublicKey("11111111111111111111111111111111"); // Sy
 const callbackInstruction = Buffer.alloc(8, 0);
 const data = Buffer.concat([DISC_REQUEST, seedBytes32, callbackProgram.toBuffer(), callbackInstruction]);
 
+const SLOT_HASHES = new PublicKey("SysvarS1otHashes111111111111111111111111111");
+
 const ix = new TransactionInstruction({
   programId: PROGRAM_ID,
   keys: [
-    { pubkey: requestPda,      isSigner: false, isWritable: true },
-    { pubkey: requesterPubkey, isSigner: true,  isWritable: true },
-    { pubkey: configPda,       isSigner: false, isWritable: false },
-    { pubkey: poolPda,         isSigner: false, isWritable: true },
-    { pubkey: escrowPda,       isSigner: false, isWritable: true },
-    { pubkey: wrapperRoundPda, isSigner: false, isWritable: false },
-    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    { pubkey: requestPda,               isSigner: false, isWritable: true  },
+    { pubkey: requesterPubkey,          isSigner: true,  isWritable: true  },
+    { pubkey: configPda,                isSigner: false, isWritable: false },
+    { pubkey: poolPda,                  isSigner: false, isWritable: true  },
+    { pubkey: escrowPda,                isSigner: false, isWritable: true  },
+    { pubkey: wrapperRoundPda,          isSigner: false, isWritable: false },
+    { pubkey: SLOT_HASHES,              isSigner: false, isWritable: false },
+    // dapp_registration: pass SystemProgram as opt-out (no fee override)
+    { pubkey: SystemProgram.programId,  isSigner: false, isWritable: false },
+    { pubkey: SystemProgram.programId,  isSigner: false, isWritable: false },
   ],
   data,
 });`}</CodeBlock>
@@ -488,7 +495,7 @@ const ix = new TransactionInstruction({
             <p>
               Validators and the crank <strong>do not run EE rounds when nobody needs randomness</strong>.
               Before opening a new round, both check two conditions: (1) is the entropy pool stale
-              (&gt; 1 500 slots since last aggregation), and (2) are there any unfulfilled{" "}
+              (&gt; {STALENESS_HARD_LIMIT_SLOTS.toLocaleString()} slots since last aggregation), and (2) are there any unfulfilled{" "}
               <Code>RequestState</Code> accounts on-chain? If the pool is warm <em>and</em> there are
               no queued requests, they idle and re-check on the next poll tick. A round starts
               automatically the moment either condition changes — no manual intervention required.
@@ -541,7 +548,7 @@ const ix = new TransactionInstruction({
               },
               {
                 title: "Pool staleness hard limit",
-                desc: `request_randomness rejects pool entropy older than ${STALENESS_HARD_LIMIT_SLOTS.toLocaleString()} slots (~10 min) from the current slot.`,
+                desc: `request_randomness routes to queue path (not fast path) for pool entropy older than ${STALENESS_HARD_LIMIT_SLOTS.toLocaleString()} slots (~2.25 hr). Matches the idle gate threshold — validators idle when the pool is fresh and there are no queued requests.`,
               },
               {
                 title: "Liveness protection",
@@ -569,7 +576,7 @@ const ix = new TransactionInstruction({
               },
               {
                 title: "Idle gate — no wasted validator resources",
-                desc: "Validators and the crank skip opening new EE rounds when the pool is warm (< 1 500 slots stale) and there are no unfulfilled RequestState accounts. A round starts automatically when the pool goes stale or a queued request appears.",
+                desc: `Validators and the crank skip opening new EE rounds when the pool is warm (< ${STALENESS_HARD_LIMIT_SLOTS.toLocaleString()} slots stale) and there are no unfulfilled RequestState accounts. A round starts automatically when the pool goes stale or a queued request appears.`,
               },
             ].map(({ title, desc }) => (
               <div key={title} className="flex gap-3 p-3 bg-surface-elevated rounded-lg border border-border">
