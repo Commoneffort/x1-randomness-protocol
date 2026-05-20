@@ -266,6 +266,20 @@ function ixRefreshValidatorStatus(voteAccount, stakeAccount) {
   });
 }
 
+// cancel_round is called directly on the EE_V4 program (not via wrapper).
+// Only the coordinator can sign. contributors = ordered list of committed wallets
+// (from ContributorEntry structs in the EE round account) — passed as remaining_accounts
+// so they get their stake returned.
+const CANCEL_ROUND_DISC = Buffer.from([82, 70, 134, 54, 46, 96, 148, 8]);
+function ixCancelEeRound(eeRoundPubkey, contributorPubkeys) {
+  const keys = [
+    { pubkey: eeRoundPubkey,      isSigner: false, isWritable: true },
+    { pubkey: identity.publicKey, isSigner: true,  isWritable: true },
+    ...contributorPubkeys.map(pk => ({ pubkey: pk, isSigner: false, isWritable: true })),
+  ];
+  return new TransactionInstruction({ programId: EE_V4, keys, data: CANCEL_ROUND_DISC });
+}
+
 function ixClaimReward(eeRound, protocolRound, insuranceFund) {
   const [cfg]    = cfgPda();
   const [escrow] = escrowPda(protocolRound);
@@ -335,9 +349,23 @@ async function runOnce() {
     // Current EE round not yet initialized — open it (binding slot not set yet so safe)
     console.log(`  EE round ${eeV4RoundId} not initialised — calling init_ee_round as coordinator`);
     try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status"); } catch (_) {}
-    const { ix } = ixInitEeRound(identity.publicKey, voteAccount, stakeAccount, eeV4RoundId);
-    await send(ix, `init_ee_round(id=${eeV4RoundId})`);
+    const { ix: initIx, eeRoundPubkey: newEeRoundPubkey } = ixInitEeRound(identity.publicKey, voteAccount, stakeAccount, eeV4RoundId);
+    await send(initIx, `init_ee_round(id=${eeV4RoundId})`);
     console.log(`  ✓ n=2, m=2, binding_slot=current+675 (derived on-chain)`);
+    // Commit immediately — don't wait for the next poll; the 200-slot window (~75s)
+    // can expire before the next iteration, especially if getProgramAccounts is slow.
+    const firstSecrets = { secret: crypto.randomBytes(32), nonce: crypto.randomBytes(32) };
+    saveSecrets(eeV4RoundId, firstSecrets.secret, firstSecrets.nonce);
+    const firstCommitment = crypto.createHash("sha256")
+      .update(Buffer.concat([firstSecrets.secret, firstSecrets.nonce, identity.publicKey.toBuffer()]))
+      .digest();
+    try {
+      await send(ixCommit(eeV4RoundId, newEeRoundPubkey, voteAccount, stakeAccount, firstCommitment), "commit_via_ee");
+      console.log(`  ✓ Committed to EE round ${eeV4RoundId} immediately after init`);
+    } catch (commitErr) {
+      console.log(`  ⚠ Immediate commit failed: ${commitErr.message} — will retry next poll`);
+    }
+    return;
   }
 
   let eeRoundPubkey = null;
@@ -439,6 +467,36 @@ async function runOnce() {
     const eeStatus = eeAcct.data[140]; // 0=CommitPhase, 1=RevealPhase, 2=Finalized, 3=Cancelled
     const slotHashExpired = cur > bindingSlot + 512;
     const roundDone = eeStatus === 2 || eeStatus === 3 || (eeStatus === 1 && slotHashExpired);
+
+    // CommitPhase (status=0) past the binding slot is irrecoverable — not enough validators
+    // committed to transition to RevealPhase. The coordinator must call cancel_round.
+    if (eeStatus === 0) {
+      const coordinator = new PublicKey(eeAcct.data.slice(8, 40));
+      const commitCount = eeAcct.data[74];
+      if (coordinator.equals(identity.publicKey)) {
+        console.log(`  ⚠ EE round ${eeV4RoundId} stuck in CommitPhase (${commitCount} commits) past binding slot — we are the coordinator, calling cancel_round`);
+        // Collect committed contributors for stake refund (ContributorEntry at offset 158, 68 bytes each)
+        const contributors = [];
+        for (let i = 0; i < commitCount; i++) {
+          const base = 158 + i * 68;
+          contributors.push(new PublicKey(eeAcct.data.slice(base, base + 32)));
+        }
+        try {
+          await send(ixCancelEeRound(eeRoundPubkey, contributors), `cancel_round(ee=${eeV4RoundId})`);
+          console.log(`  ✓ EE round ${eeV4RoundId} cancelled`);
+        } catch (cancelErr) {
+          if (cancelErr.message?.includes("0x3") || cancelErr.message?.includes("Cancelled")) {
+            console.log(`  EE round ${eeV4RoundId} already cancelled`);
+          } else {
+            console.log(`  ⚠ cancel_round failed: ${cancelErr.message}`);
+          }
+        }
+      } else {
+        console.log(`  ⚠ EE round ${eeV4RoundId} stuck in CommitPhase (${commitCount} commits) past binding slot — waiting for coordinator (${coordinator.toBase58().slice(0,8)}…) to call cancel_round`);
+      }
+      return;
+    }
+
     if (roundDone) {
       if (eeStatus === 1 && slotHashExpired) {
         console.log(`  EE round ${eeV4RoundId} stuck in RevealPhase — binding slot hash expired, abandoning`);
