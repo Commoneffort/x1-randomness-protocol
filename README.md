@@ -168,9 +168,9 @@ aggregate_from_ee(protocol_wrapper_round, ee_round)
 distribute_fees()
   → requires protocol WrapperRound.aggregated == true
   → records original_fees = pending_fees on FeeEscrow
-  → sends 10% of pending_fees to insurance_fund
+  → sends 5% of pending_fees to crank caller immediately
   → sets fee_distributed = true (idempotent — rejects on re-entry)
-  → 90% stays in FeeEscrow for validators to claim
+  → 95% stays in FeeEscrow for validators to claim
 ```
 
 ### 9. Claim validator reward
@@ -180,7 +180,7 @@ claim_validator_reward()
   → requires ValidatorReveal PDA created at reveal time
   → requires fee_escrow.fee_distributed == true
   → reads reveal_count from EE V4 round data at offset 75
-  → pays: original_fees × 90% ÷ reveal_count to contributor
+  → pays: original_fees × 95% ÷ reveal_count to contributor
   → marks ValidatorReveal.claimed = true (rejects on re-entry)
 ```
 
@@ -206,8 +206,8 @@ request_randomness(seed, callback_program, callback_instruction)
 | `request_randomness(seed, callback)` | Request entropy — instant if pool warm, queued if cold | Any wallet / dApp |
 | `game_seed(game_id)` | Fast seed from pool entropy — warm pool only | Any wallet |
 | `advance_round` | Move to next protocol round | Anyone (permissionless) |
-| `distribute_fees` | Take 10% insurance cut; record original_fees; enable validator claims | Anyone (permissionless) |
-| `claim_validator_reward` | Per-validator fee claim — original_fees × 90% ÷ reveal_count | Validator |
+| `distribute_fees` | Pay 5% to crank; record original_fees; enable validator 95% claims | Anyone (permissionless, earns 5%) |
+| `claim_validator_reward` | Per-validator fee claim — original_fees × 95% ÷ reveal_count | Validator |
 | `set_fee(new_fee)` | Update protocol-wide request fee | Authority |
 | `update_dapp_fee(fee_override)` | Set per-dApp fee override, 0 = protocol default | Protocol authority |
 | `refund_request` | Refund fee if EE V4 round was cancelled (status byte 140 == 3) | Requester |
@@ -253,7 +253,7 @@ request_randomness(seed, callback_program, callback_instruction)
 | EE V4 commitment | `SHA256(secret ‖ nonce ‖ contributor_pubkey)` |
 | Game seed output | `SHA256(pool_entropy ‖ game_id)` |
 | Validator eligibility | `SHA256(SHA256(pool_entropy ‖ ee_round_id) ‖ contributor_pubkey)[0..8] < COMMIT_SELECTION_THRESHOLD` |
-| Per-validator reward | `original_fees × 90% ÷ reveal_count` |
+| Per-validator reward | `original_fees × 95% ÷ reveal_count` |
 
 ## Economics
 
@@ -263,8 +263,8 @@ request_randomness(seed, callback_program, callback_instruction)
 | Premium request fee | 0.05 XNT (set by protocol authority via `update_dapp_fee`) |
 | Game seed fee | 0.001 XNT — flows to validators via FeeEscrow, same as request fees |
 | EE V4 stake (per commit) | 0.01 XNT — returned in full on valid reveal; forfeited on miss |
-| Insurance fund | 10% of round fees via `distribute_fees` |
-| Validator share | 90% ÷ reveal_count via `claim_validator_reward` |
+| Crank reward | 5% of round fees to `distribute_fees` caller (V4.5) |
+| Validator share | 95% ÷ reveal_count via `claim_validator_reward` (V4.5) |
 
 All fees — both `request_randomness` and `game_seed` — accumulate in the round's `FeeEscrow` PDA and are distributed to validators after each round via `distribute_fees` + `claim_validator_reward`.
 
@@ -293,7 +293,7 @@ All fees — both `request_randomness` and `game_seed` — accumulate in the rou
 | 0 | 8 | Anchor discriminator |
 | 8 | 8 | `pending_fees` (u64) |
 | 16 | 8 | `round` (u64) |
-| 24 | 8 | `original_fees` (u64) — total before insurance cut; used for per-validator calc |
+| 24 | 8 | `original_fees` (u64) — total before crank cut (V4.5); used for per-validator 95% calc |
 | 32 | 8 | `ee_v4_round_id` (u64) — EE V4 round that services this protocol round |
 | 40 | 1 | `fee_distributed` (bool) — set by `distribute_fees`; required before `claim_validator_reward` |
 | 41 | 1 | `bump` (u8) |
@@ -592,15 +592,34 @@ If an EE V4 round is cancelled (status byte 140 == 3), `refund_request` lets req
 ### Staleness Hard Limit
 `request_randomness` routes to the queue path (rather than failing) when pool entropy is older than `STALENESS_HARD_LIMIT_SLOTS` (21,600 slots ≈ 2.25 hours). The keepers' idle gate matches this threshold — they hold off opening a new EE round until the pool is stale OR a pending request appears, keeping costs low during quiet periods.
 
-### Insurance Fund Separation
-`claim_validator_fees` (dust sweep) sends residual lamports to `insurance_fund`, not to the authority's personal wallet.
+### Insurance Fund Removed (V4.5)
+`distribute_fees` no longer sends any share to an insurance fund. 100% of fees go to protocol participants: 5% crank, 95% validators. `claim_validator_fees` (dust sweep) sends residual lamports to the `protocol_config.authority` wallet. The `insurance_fund` field in `ProtocolConfig` is retained for layout compatibility but is no longer used.
 
 ## Changelog
+
+### V4.5 (2026-05-20) — no insurance fund; 95% to validators; request history lookup
+
+**Program (deployed 2026-05-20, tx `2Fev2T9Y8EHN9eXkuHULB1nNwb84dFjYjMHvjrrsbxc8CGW2kPwMVfXj7pZaVzX8J2DoC9NVftzcdLR1CyndfVnG`):**
+- **Remove insurance fund** — `insurance_fund` account removed from `DistributeFees` struct. `distribute_fees` now pays 5% to crank, 95% stays in FeeEscrow for validators (was 5% crank + 5% insurance + 90% validators).
+- **`claim_validator_reward` updated** — validator share formula changed from `original_fees × 90%` → `original_fees × 95%`.
+- **`claim_validator_fees` dust sweep** — recipient changed from `insurance_fund` → `protocol_config.authority`.
+
+**Keeper (`run-round.js`, `validator-daemon.js`):**
+- `ixDistributeFees` drops from 6 to 5 accounts (no more `insurance_fund`).
+- `ixClaimReward` removes unused `insuranceFund` parameter.
+
+**Frontend:**
+- `FEE_VALIDATORS_PCT = 95`, `FEE_INSURANCE_PCT = 0` in `constants.ts`.
+- Fee split updated to "95% validators / 5% crank" across all pages.
+- `/request` page: new "Request History by Address" panel — enter any wallet address to see total requests and fulfilled count. Connected wallet stats shown automatically.
+- `protocol.ts`: new `getRequestsByRequester(requester)` method using `getProgramAccounts` with memcmp on offset 40 (requester pubkey).
+
+**Security audit (V4.5):** Full review found no critical vulnerabilities. Arithmetic is safe (checked_* throughout). Fee distribution is one-shot (fee_distributed flag). Validator eligibility is entropy-derived and manipulation-resistant. Slot-hash mixing prevents pre-computation. No reentrancy. Pre-existing functional note: queue-path `RequestState` requests have no on-chain fulfill instruction (pool is kept warm by keepers to avoid this path).
 
 ### V4.4 (2026-05-19) — crank rewards + dApp request counters
 
 **Program (deployed 2026-05-19, tx `2HHE1kpjbCaAGLyuKzf6maNt9MucCyrenjQU8efkinsekTdR2MJhp5geLKrBe5PqB2rrSfuuV7RVCN3nwELs5H4x`):**
-- **Crank reward** — `distribute_fees` now pays 5% of round fees immediately to the caller (`crank: Signer` account). Insurance fund share reduced from 10% → 5%. Validator share unchanged at 90%. Any wallet running `run-round.js` earns this reward automatically.
+- **Crank reward** — `distribute_fees` now pays 5% of round fees immediately to the caller (`crank: Signer` account). Insurance fund share reduced from 10% → 5%; validator share unchanged at 90%. (Superseded by V4.5: insurance removed entirely, validators now get 95%.)
 - **dApp request counters** — `request_randomness` now increments `DappRegistration.total_requests` and updates `last_served_round` when the dApp account is passed as writable. Previously these fields were never written. Pass the dApp registration as `isWritable: true` to enable tracking.
 
 **Frontend:**

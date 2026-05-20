@@ -127,7 +127,7 @@ VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --regi
 - **Slot hash mixing** — both `finalize_via_ee` and `aggregate_from_ee` read the most-recent hash from the SlotHashes sysvar. SlotHashes account is **required** in both instructions.
 - **`request_randomness` output** — `SHA256(pool_entropy ‖ request_id ‖ slot_hash)`. Slot hash is unknown at submission time, preventing pre-computation even with known pool entropy.
 - **`fee_distributed` flag** — `distribute_fees` is idempotent. `claim_validator_reward` requires `fee_distributed == true`.
-- **`claim_validator_fees` (dust sweep)** — recipient restricted to `insurance_fund`, not authority personal wallet.
+- **`claim_validator_fees` (dust sweep)** — recipient restricted to `protocol_config.authority`, not arbitrary wallets.
 - **`verify_entropy`** — requires a fulfilled `RequestState`. `derived_output` copied from stored value, not recomputed.
 - **Staleness hard limit** — pool entropy older than `STALENESS_HARD_LIMIT_SLOTS` (21 600 slots ≈ 2.25 hours) routes `request_randomness` to the queue path instead of the fast path. Matches the keeper idle gate threshold.
 - **`deliver_callback`** — requires a `caller: Signer` (permissionless crank but must sign).
@@ -155,12 +155,12 @@ distribute_fees()        → requires protocol WrapperRound.aggregated == true
 
 `distribute_fees` will return `RoundNotAggregatable` if `aggregate_from_ee` has not been called on the protocol WrapperRound after EE finalization.
 
-### Per-validator reward flow (V3)
+### Per-validator reward flow (V4.5)
 
 ```
 reveal_via_ee()          → creates ValidatorReveal PDA [b"validator-reveal", ee_round, contributor]
-distribute_fees()        → records original_fees on FeeEscrow before insurance cut
-claim_validator_reward() → pays original_fees × 90% ÷ reveal_count to contributor
+distribute_fees()        → records original_fees on FeeEscrow; pays 5% to crank immediately
+claim_validator_reward() → pays original_fees × 95% ÷ reveal_count to contributor
                            reads reveal_count from EE V4 round data at offset 75
 ```
 
@@ -215,7 +215,7 @@ Seeds: `[b"entropy-pool"]`
 |--------|-------|
 | 8 | `pending_fees` (u64) |
 | 16 | `round` (u64) |
-| 24 | `original_fees` (u64) — total fees before insurance cut; used for per-validator share |
+| 24 | `original_fees` (u64) — total fees before crank cut (V4.5); used for per-validator 95% share |
 | 32 | `ee_v4_round_id` (u64) — EE V4 round that services this protocol round |
 | 40 | `fee_distributed` (bool) |
 | 41 | `bump` (u8) |
@@ -308,10 +308,12 @@ Full field layout (Borsh/Anchor, no padding):
 | Premium request fee | 0.05 XNT (high-volume dApps — set via `update_dapp_fee`) |
 | Game seed fee | 0.001 XNT |
 | EE V4 stake | 0.01 XNT (fully returned on valid reveal) |
-| Crank reward | 5% to `distribute_fees` caller (V4.4) — paid immediately from FeeEscrow |
-| Insurance fund | 5% of round fees via `distribute_fees` (was 10% before V4.4) |
-| Validator share | 90% ÷ reveal_count via `claim_validator_reward` |
+| Crank reward | 5% to `distribute_fees` caller (V4.5) — paid immediately from FeeEscrow |
+| Insurance fund | removed in V4.5 (was 5% in V4.4) |
+| Validator share | 95% ÷ reveal_count via `claim_validator_reward` (was 90% in V4.4) |
 
 Premium tier is set by the protocol authority calling `update_dapp_fee` after a dApp registers. Validators earn more per round from premium dApps, directly incentivising liveness for high-value use cases.
 
-**Crank reward (V4.4):** `distribute_fees` now pays 5% of `original_fees` immediately to the caller (`crank` account in the Accounts struct). Any wallet running `run-round.js` earns this reward. The `crank` account must be a `Signer` with `isWritable: true` — the program transfers lamports directly from the FeeEscrow. No extra PDA or claim step needed.
+**Crank reward (V4.5):** `distribute_fees` pays 5% of `original_fees` immediately to the caller (`crank` account in the Accounts struct). Any wallet running `run-round.js` earns this reward. The `crank` account must be a `Signer` with `isWritable: true` — the program transfers lamports directly from the FeeEscrow. No extra PDA or claim step needed.
+
+**No insurance fund (V4.5):** The insurance_fund account was removed from `DistributeFees`. The `insurance_fund` field still exists in `ProtocolConfig` on-chain (layout unchanged) but is no longer used for fee distribution. Dust from rounding errors flows to the protocol authority via `claim_validator_fees` instead.
