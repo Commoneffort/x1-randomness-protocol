@@ -547,9 +547,8 @@ export default function DappsPage() {
           </div>
           <div className="p-3 bg-surface-elevated rounded-lg">
             <p className="text-xs text-text-muted">Fee Split</p>
-            <p className="font-medium text-text-primary mt-0.5">90% → validators</p>
+            <p className="font-medium text-text-primary mt-0.5">95% → validators</p>
             <p className="font-medium text-text-primary">5% → crank runner</p>
-            <p className="font-medium text-text-primary">5% → insurance fund</p>
           </div>
         </div>
         <p className="text-xs text-text-muted mt-1">

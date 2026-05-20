@@ -283,7 +283,7 @@ impl RequestState {
 pub struct FeeEscrow {
     pub pending_fees: u64,
     pub round: u64,
-    pub original_fees: u64,       // total fees before insurance cut; used for per-validator share calc
+    pub original_fees: u64,       // total fees before crank cut; used for per-validator 95% share calc
     pub ee_v4_round_id: u64,      // EE V4 round that services this protocol round
     pub fee_distributed: bool,    // true once distribute_fees has run; claim requires this
     pub bump: u8,
@@ -757,16 +757,14 @@ pub struct ClaimValidatorFees<'info> {
         seeds = [b"fee-escrow", &fee_escrow.round.to_le_bytes()],
         bump = fee_escrow.bump,
         constraint = fee_escrow.pending_fees > 0 @ RandomnessError::FeeEscrowInsufficient,
-        // distribute_fees must have run first — prevents authority from bypassing
-        // the insurance fund cut by claiming before distribution.
+        // distribute_fees must have run first — prevents bypassing the crank cut.
         constraint = fee_escrow.fee_distributed @ RandomnessError::RoundNotAggregatable,
     )]
     pub fee_escrow: Account<'info, FeeEscrow>,
-    /// CHECK: Must be the protocol insurance fund — dust is swept there, not to
-    /// the authority's personal wallet.
+    /// CHECK: Dust is swept to the protocol authority wallet.
     #[account(
         mut,
-        constraint = recipient.key() == protocol_config.insurance_fund @ RandomnessError::Unauthorized,
+        constraint = recipient.key() == protocol_config.authority @ RandomnessError::Unauthorized,
     )]
     pub recipient: AccountInfo<'info>,
     #[account(
@@ -795,12 +793,6 @@ pub struct DistributeFees<'info> {
         bump = fee_escrow.bump,
     )]
     pub fee_escrow: Account<'info, FeeEscrow>,
-    /// CHECK: Insurance fund receives 5% — permissionless but constrained to protocol address.
-    #[account(
-        mut,
-        constraint = insurance_fund.key() == protocol_config.insurance_fund,
-    )]
-    pub insurance_fund: AccountInfo<'info>,
     /// Crank runner receives 5% reward for calling this instruction.
     #[account(mut)]
     pub crank: Signer<'info>,
@@ -2024,9 +2016,8 @@ pub mod randomness_wrapper {
         Ok(())
     }
 
-    /// Sweep any remaining fees (rounding dust, unclaimed shares) to the protocol authority.
+    /// Sweep any remaining fees (rounding dust after all validators claimed) to the protocol authority.
     /// Individual validators should use claim_validator_reward instead.
-    /// This is a safety valve for residual lamports after all validators have claimed.
     pub fn claim_validator_fees(ctx: Context<ClaimValidatorFees>) -> Result<()> {
         let escrow = &mut ctx.accounts.fee_escrow;
         let amount = escrow.pending_fees;
@@ -2052,33 +2043,26 @@ pub mod randomness_wrapper {
     pub fn distribute_fees(ctx: Context<DistributeFees>) -> Result<()> {
         let escrow = &mut ctx.accounts.fee_escrow;
 
-        // One-shot: prevents repeatedly calling this to drain more than 10% to crank+insurance.
+        // One-shot: prevents repeatedly calling this to drain more than 5% to crank.
         require!(!escrow.fee_distributed, RandomnessError::RoundAlreadyAggregated);
 
         let total_fees = escrow.pending_fees;
         require!(total_fees > 0, RandomnessError::FeeEscrowInsufficient);
 
-        // Snapshot original_fees before any cuts — validators use this for their share calc.
+        // Snapshot original_fees before crank cut — validators use this for their 95% share calc.
         escrow.original_fees = total_fees;
 
-        // 5% to insurance fund, 5% to crank runner (one-time, never re-enterable)
-        let insurance_share = total_fees
-            .checked_mul(5)
-            .ok_or(error!(RandomnessError::Overflow))? / 100;
+        // 5% to crank runner (one-time, never re-enterable); 95% stays for validators.
         let crank_share = total_fees
             .checked_mul(5)
             .ok_or(error!(RandomnessError::Overflow))? / 100;
-        let total_cut = insurance_share
-            .checked_add(crank_share)
-            .ok_or(error!(RandomnessError::Overflow))?;
 
-        **escrow.to_account_info().try_borrow_mut_lamports()? -= total_cut;
-        **ctx.accounts.insurance_fund.try_borrow_mut_lamports()? += insurance_share;
+        **escrow.to_account_info().try_borrow_mut_lamports()? -= crank_share;
         **ctx.accounts.crank.try_borrow_mut_lamports()? += crank_share;
 
-        // 90% stays in escrow for validators — mark as distributed so claim is now unlocked.
+        // 95% stays in escrow for validators — mark as distributed so claim is now unlocked.
         escrow.pending_fees = total_fees
-            .checked_sub(total_cut)
+            .checked_sub(crank_share)
             .ok_or(error!(RandomnessError::Overflow))?;
         escrow.fee_distributed = true;
 
@@ -2295,7 +2279,7 @@ pub mod randomness_wrapper {
     }
 
     /// Claim a validator's proportional share of round fees.
-    /// Share = original_fees * 90% / reveal_count.
+    /// Share = original_fees * 95% / reveal_count.
     /// Requires distribute_fees to have run and the validator to have a ValidatorReveal PDA.
     pub fn claim_validator_reward(ctx: Context<ClaimValidatorReward>) -> Result<()> {
         // Read reveal_count from EE V4 round data (offset 75, u8).
@@ -2318,9 +2302,9 @@ pub mod randomness_wrapper {
         );
 
         let escrow = &mut ctx.accounts.fee_escrow;
-        // Per-validator share = 90% of pre-insurance total / number of revealers.
+        // Per-validator share = 95% of pre-crank total / number of revealers.
         let validator_share = escrow.original_fees
-            .checked_mul(90).ok_or(error!(RandomnessError::Overflow))?
+            .checked_mul(95).ok_or(error!(RandomnessError::Overflow))?
             .checked_div(100).ok_or(error!(RandomnessError::Overflow))?
             .checked_div(reveal_count).ok_or(error!(RandomnessError::Overflow))?;
 

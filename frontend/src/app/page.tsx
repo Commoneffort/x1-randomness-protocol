@@ -10,7 +10,7 @@ import {
   ShieldCheckIcon,
 } from "@heroicons/react/24/outline";
 import { PublicKey } from "@solana/web3.js";
-import { ProtocolClient, ProtocolConfig, EntropyPool } from "@/lib/protocol";
+import { ProtocolClient, ProtocolConfig, EntropyPool, ValidatorRegistration } from "@/lib/protocol";
 import { PROGRAM_ID, REQUEST_FEE_LAMPORTS, GAME_SEED_FEE_LAMPORTS, SLOT_DURATION_MS, STALENESS_HARD_LIMIT_SLOTS, DISC } from "@/lib/constants";
 
 function StatCard({
@@ -117,6 +117,7 @@ export default function DashboardPage() {
   const [currentSlot, setCurrentSlot] = useState(0);
   const [loading, setLoading] = useState(true);
   const [crankRunners, setCrankRunners] = useState<string[]>([]);
+  const [validatorMap, setValidatorMap] = useState<Map<string, ValidatorRegistration>>(new Map());
 
   const [client] = useState(() => new ProtocolClient());
 
@@ -140,11 +141,15 @@ export default function DashboardPage() {
   useEffect(() => {
     fetchData();
     const iv = setInterval(fetchData, 3000);
-    // Crank runners change rarely — fetch once on load, refresh every 2 min
-    fetchCrankRunners().then(setCrankRunners).catch(console.error);
-    const crankIv = setInterval(() => {
+    // Crank runners + validator registry change rarely — fetch once, refresh every 2 min
+    const refreshCrankData = () => {
       fetchCrankRunners().then(setCrankRunners).catch(console.error);
-    }, 120_000);
+      client.getAllValidatorRegistrations()
+        .then(vals => setValidatorMap(new Map(vals.map(v => [v.identity, v]))))
+        .catch(console.error);
+    };
+    refreshCrankData();
+    const crankIv = setInterval(refreshCrankData, 120_000);
     return () => { clearInterval(iv); clearInterval(crankIv); };
   }, []);
 
@@ -209,16 +214,24 @@ export default function DashboardPage() {
               <span className="font-bold text-text-primary text-lg">{crankRunners.length}</span> unique wallet{crankRunners.length !== 1 ? "s" : ""} have called <code className="font-mono text-xs bg-surface-elevated px-1 rounded">distribute_fees</code> recently and earned the 5% crank reward.
             </p>
             <div className="space-y-1 mt-2">
-              {crankRunners.map(addr => (
-                <div key={addr} className="flex items-center gap-2 p-2 bg-surface-elevated rounded-lg">
-                  <span className="w-2 h-2 rounded-full bg-green-400 shrink-0" />
-                  <a
-                    href={`https://explorer.x1.xyz/address/${addr}`}
-                    target="_blank" rel="noopener noreferrer"
-                    className="font-mono text-xs text-primary hover:underline truncate"
-                  >{addr}</a>
-                </div>
-              ))}
+              {crankRunners.map(addr => {
+                const val = validatorMap.get(addr);
+                return (
+                  <div key={addr} className="flex items-center gap-2 p-2 bg-surface-elevated rounded-lg">
+                    <span className="w-2 h-2 rounded-full bg-green-400 shrink-0" />
+                    <a
+                      href={`https://explorer.x1.xyz/address/${addr}`}
+                      target="_blank" rel="noopener noreferrer"
+                      className="font-mono text-xs text-primary hover:underline truncate"
+                    >{addr}</a>
+                    {val && (
+                      <span className={`ml-auto shrink-0 text-xs font-semibold px-2 py-0.5 rounded-full ${val.active ? "bg-green-100 text-green-700" : "bg-yellow-100 text-yellow-700"}`}>
+                        {val.active ? "Validator ✓" : "Validator (inactive)"}
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
@@ -237,7 +250,7 @@ export default function DashboardPage() {
             { label: "Slot Duration", value: `${SLOT_DURATION_MS}ms (~2.67 slots/s)` },
             { label: "EE V4 Binding Delay", value: "~675 slots (~4.2 min)" },
             { label: "Pool Staleness Limit", value: "21,600 slots (~2.25 hr)" },
-            { label: "Fee Split", value: "90% validators / 5% crank / 5% insurance" },
+            { label: "Fee Split", value: "95% validators / 5% crank" },
           ].map(({ label, value, mono }) => (
             <div key={label} className="p-3 bg-surface-elevated rounded-lg">
               <p className="text-xs text-text-muted">{label}</p>
@@ -287,7 +300,7 @@ export default function DashboardPage() {
           {[
             { icon: ShieldCheckIcon, title: "Fully Permissionless", desc: "No keeper authority. advance_round, finalize_via_ee, aggregate_from_ee, and distribute_fees are all open cranks any wallet can call." },
             { icon: BoltIcon, title: "On-Chain Validator Selection", desc: "commit_via_ee eligibility is derived from pool entropy — no external actor can control who participates in a round." },
-            { icon: CubeIcon, title: "Per-Validator Rewards", desc: "Both request fees and game seed fees flow to validators. 90% split by reveal_count via claim_validator_reward; 5% to crank runner; 5% to insurance." },
+            { icon: CubeIcon, title: "Per-Validator Rewards", desc: "Both request fees and game seed fees flow to validators. 95% split by reveal_count via claim_validator_reward; 5% to crank runner." },
             { icon: CheckCircleIcon, title: "Liveness Protection", desc: "refund_request lets users recover fees if an EE V4 round is cancelled. Validators who miss reveals forfeit their 0.01 XNT stake." },
           ].map(({ icon: Icon, title, desc }) => (
             <div key={title} className="flex gap-3 p-3 bg-surface-elevated rounded-lg">

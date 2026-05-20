@@ -94,7 +94,7 @@ export default function RoundsPage() {
           </div>
           <div className="flex gap-2 items-start">
             <span className="w-2.5 h-2.5 mt-1 rounded-full bg-blue-500 shrink-0" />
-            <div><strong className="text-text-primary">Distributed</strong> — 5% to crank + 5% insurance taken; validators can claim 90% share</div>
+            <div><strong className="text-text-primary">Distributed</strong> — 5% to crank taken; validators can claim 95% share</div>
           </div>
         </div>
       </div>
@@ -177,7 +177,7 @@ export default function RoundsPage() {
                           </div>
                           <div className="p-3 bg-surface-elevated rounded-lg">
                             <p className="text-xs text-text-muted">Fee Status</p>
-                            <p className="text-sm text-text-primary">{escrow.feeDistributed ? "Distributed (5% crank + 5% insurance)" : "Held (pending distribution)"}</p>
+                            <p className="text-sm text-text-primary">{escrow.feeDistributed ? "Distributed (95% validators + 5% crank)" : "Held (pending distribution)"}</p>
                           </div>
                         </>
                       )}

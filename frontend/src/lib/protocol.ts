@@ -378,6 +378,27 @@ export class ProtocolClient {
     }
   }
 
+  async getRequestsByRequester(requester: PublicKey): Promise<{ total: number; fulfilled: number }> {
+    try {
+      const disc = ACCT_DISC.RequestState;
+      const accounts = await this.connection.getProgramAccounts(
+        new PublicKey(require("./constants").PROGRAM_ID),
+        {
+          commitment: "confirmed",
+          dataSlice: { offset: 152, length: 1 }, // only fetch the fulfilled byte to minimise data
+          filters: [
+            { memcmp: { offset: 0,  bytes: bs58.encode(disc) } },
+            { memcmp: { offset: 40, bytes: requester.toBase58() } },
+          ],
+        }
+      );
+      const fulfilled = accounts.filter(a => a.account.data[0] !== 0).length;
+      return { total: accounts.length, fulfilled };
+    } catch {
+      return { total: 0, fulfilled: 0 };
+    }
+  }
+
   async getValidatorReveals(contributor: PublicKey): Promise<ValidatorReveal[]> {
     try {
       const disc = ACCT_DISC.ValidatorReveal;

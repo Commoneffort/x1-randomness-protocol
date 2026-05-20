@@ -18,9 +18,9 @@ export const SLOT_DURATION_MS = 375;               // ~375ms per slot on X1 main
 export const STALENESS_HARD_LIMIT_SLOTS = 21_600;  // ~2.25 hr — matches Rust program constant and idle gate
 export const EE_V4_MIN_BINDING_SLOTS = 675;        // minimum binding slot offset
 
-// Fee distribution (V4.4)
-export const FEE_VALIDATORS_PCT = 90;
-export const FEE_INSURANCE_PCT  = 5;
+// Fee distribution (V4.5)
+export const FEE_VALIDATORS_PCT = 95;
+export const FEE_INSURANCE_PCT  = 0;
 export const FEE_CRANK_PCT      = 5;
 
 // Anchor instruction discriminators: sha256("global:<name>")[:8]

@@ -23,7 +23,7 @@
  *   6. [validators reveal independently via validator-daemon]
  *   7. finalize_via_ee        — finalize EE V4 (permissionless, after binding_slot)
  *   8. aggregate_from_ee      — mix EE entropy into pool (permissionless)
- *   9. distribute_fees        — split fees to validators + insurance fund (permissionless)
+ *   9. distribute_fees        — split 5% to crank + 95% to validators (permissionless)
  */
 
 // rpc-websockets dropped CommonClient and WebSocket from its main exports;
@@ -265,14 +265,13 @@ function ixAggregateFromEe(protocolRound, eeRound) {
   });
 }
 
-function ixDistributeFees(round, insuranceFund) {
+function ixDistributeFees(round) {
   const [cfg] = cfgPda(); const [wr] = wrapperPda(round); const [escrow] = escrowPda(round);
   return new TransactionInstruction({ programId: PROGRAM_ID,
     keys: [
       { pubkey: cfg,                     isSigner: false, isWritable: false },
       { pubkey: wr,                      isSigner: false, isWritable: false },
       { pubkey: escrow,                  isSigner: false, isWritable: true },
-      { pubkey: insuranceFund,           isSigner: false, isWritable: true },
       { pubkey: payer.publicKey,         isSigner: true,  isWritable: true  },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
@@ -293,7 +292,6 @@ async function runRound() {
   const cfgData        = cfgAcct.data;
   const currentRound   = readU64(cfgData, 72);
   const eeV4RoundId    = readU64(cfgData, 88);
-  const insuranceFund  = new PublicKey(cfgData.slice(40, 72));
   const nextRound      = currentRound + 1;
   const thisEeId       = eeV4RoundId;   // EE round validators just opened
   const nextEeId       = eeV4RoundId + 1;
@@ -302,8 +300,7 @@ async function runRound() {
   console.log(`\nCrank key   : ${payer.publicKey.toBase58()}`);
   console.log(`Balance     : ${(bal / LAMPORTS_PER_SOL).toFixed(4)} XNT`);
   console.log(`Protocol    : round ${currentRound} → ${nextRound}`);
-  console.log(`EE V4       : completing ${thisEeId}, next will be ${nextEeId}`);
-  console.log(`Insurance   : ${insuranceFund.toBase58().slice(0, 12)}…\n`);
+  console.log(`EE V4       : completing ${thisEeId}, next will be ${nextEeId}\n`);
 
   // ── Optional: register crank key as validator ──────────────────────────────
   if (doRegister) {
@@ -408,7 +405,7 @@ async function runRound() {
 
     console.log(`  [1c] distribute_fees (round ${currentRound})`);
     try {
-      await send(ixDistributeFees(currentRound, insuranceFund), [payer], "distribute_fees");
+      await send(ixDistributeFees(currentRound), [payer], "distribute_fees");
     } catch (e) {
       if (e.message?.includes("FeeEscrowInsufficient") || e.message?.includes("0x177f")) {
         console.log(`  ↳ No fees (no requests this round)`);
@@ -528,7 +525,7 @@ async function runRound() {
   // ── Step 8: Distribute fees ────────────────────────────────────────────────
   console.log(`\n[8] distribute_fees (round ${nextRound})`);
   try {
-    await send(ixDistributeFees(nextRound, insuranceFund), [payer], "distribute_fees");
+    await send(ixDistributeFees(nextRound), [payer], "distribute_fees");
   } catch (e) {
     if (e.message?.includes("FeeEscrowInsufficient") || e.message?.includes("0x177f")) {
       console.log(`  ↳ No fees to distribute (no requests this round — ok)`);

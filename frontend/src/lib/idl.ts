@@ -122,9 +122,11 @@ export const IDL: Idl = {
     {
       "name": "distributeFees",
       "accounts": [
-        { "name": "feeEscrow", "isMut": true, "isSigner": false },
         { "name": "protocolConfig", "isMut": false, "isSigner": false },
-        { "name": "insuranceFund", "isMut": true, "isSigner": false }
+        { "name": "wrapperRound", "isMut": false, "isSigner": false },
+        { "name": "feeEscrow", "isMut": true, "isSigner": false },
+        { "name": "crank", "isMut": true, "isSigner": true },
+        { "name": "systemProgram", "isMut": false, "isSigner": false }
       ],
       "args": []
     },

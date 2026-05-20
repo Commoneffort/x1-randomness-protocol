@@ -41,6 +41,12 @@ export default function RequestPage() {
   const [gameSeedResult, setGameSeedResult] = useState<{ sig: string; output: string } | null>(null);
   const [gameSeedError, setGameSeedError] = useState<string | null>(null);
 
+  // Request lookup state
+  const [lookupAddr, setLookupAddr] = useState("");
+  const [lookupResult, setLookupResult] = useState<{ total: number; fulfilled: number } | null>(null);
+  const [lookupLoading, setLookupLoading] = useState(false);
+  const [myStats, setMyStats] = useState<{ total: number; fulfilled: number } | null>(null);
+
   useEffect(() => {
     const fetchStatus = async () => {
       const [pool, slot] = await Promise.all([
@@ -57,6 +63,25 @@ export default function RequestPage() {
     const iv = setInterval(fetchStatus, 3000);
     return () => clearInterval(iv);
   }, [client]);
+
+  useEffect(() => {
+    if (!publicKey) { setMyStats(null); return; }
+    client.getRequestsByRequester(publicKey).then(setMyStats);
+  }, [client, publicKey]);
+
+  const handleLookup = async () => {
+    if (!lookupAddr.trim()) return;
+    setLookupLoading(true); setLookupResult(null);
+    try {
+      const pk = new PublicKey(lookupAddr.trim());
+      const result = await client.getRequestsByRequester(pk);
+      setLookupResult(result);
+    } catch {
+      setLookupResult(null);
+    } finally {
+      setLookupLoading(false);
+    }
+  };
 
   const generateSeed = () => {
     const arr = new Uint8Array(32);
@@ -265,6 +290,44 @@ export default function RequestPage() {
         );
       })()}
 
+      {/* Request stats lookup */}
+      <div className="card">
+        <h2 className="text-sm font-semibold text-text-primary mb-3">Request History by Address</h2>
+        {myStats && publicKey && (
+          <div className="mb-3 p-3 bg-surface-elevated rounded-lg flex items-center gap-4 text-sm">
+            <div>
+              <p className="text-xs text-text-muted">Your wallet ({publicKey.toBase58().slice(0,8)}…)</p>
+              <p className="font-medium text-text-primary">{myStats.total} requests · {myStats.fulfilled} fulfilled</p>
+            </div>
+          </div>
+        )}
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={lookupAddr}
+            onChange={e => setLookupAddr(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") handleLookup(); }}
+            placeholder="Any wallet or dApp address (base58)"
+            className="input-field flex-1 font-mono text-sm"
+          />
+          <button
+            onClick={handleLookup}
+            disabled={lookupLoading || !lookupAddr.trim()}
+            className="btn-secondary shrink-0"
+          >
+            {lookupLoading ? "…" : "Lookup"}
+          </button>
+        </div>
+        {lookupResult && (
+          <div className="mt-3 p-3 bg-surface-elevated rounded-lg text-sm">
+            <p className="font-mono text-xs text-text-muted mb-1">{lookupAddr.slice(0,12)}…</p>
+            <p className="font-medium text-text-primary">
+              {lookupResult.total} requests · {lookupResult.fulfilled} fulfilled · {lookupResult.total - lookupResult.fulfilled} pending
+            </p>
+          </div>
+        )}
+      </div>
+
       {/* Tabs */}
       <div className="flex gap-1 bg-surface-elevated rounded-lg p-1 w-fit border border-border">
         <button
@@ -384,7 +447,7 @@ export default function RequestPage() {
             <div className="space-y-2 text-sm text-text-secondary">
               {[
                 ["1", "Generate a 32-byte seed. This personalizes your random output — two requests with the same round entropy but different seeds get different outputs."],
-                ["2", `Pay ${REQUEST_FEE_LAMPORTS / 1e9} XNT. Fees go into the round's FeeEscrow and are distributed 90% to validators / 5% to crank runner / 5% insurance after the round.`],
+                ["2", `Pay ${REQUEST_FEE_LAMPORTS / 1e9} XNT. Fees go into the round's FeeEscrow and are distributed 95% to validators / 5% to crank runner after the round.`],
                 ["3", "If the pool is warm (fast path), your output is derived from existing pool entropy immediately. Otherwise, the request queues for the next EE V4 round."],
                 ["4", "Output: SHA256(pool_entropy ‖ request_id ‖ slot_hash) — the slot hash is unknown at submission time, making outputs unpredictable even with known pool entropy. Deterministic and verifiable on-chain."],
               ].map(([n, text]) => (

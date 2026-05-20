@@ -280,7 +280,7 @@ function ixCancelEeRound(eeRoundPubkey, contributorPubkeys) {
   return new TransactionInstruction({ programId: EE_V4, keys, data: CANCEL_ROUND_DISC });
 }
 
-function ixClaimReward(eeRound, protocolRound, insuranceFund) {
+function ixClaimReward(eeRound, protocolRound) {
   const [cfg]    = cfgPda();
   const [escrow] = escrowPda(protocolRound);
   const [vr]     = vrPda(eeRound, identity.publicKey);
@@ -309,7 +309,6 @@ async function runOnce() {
   const cfgData       = cfgAcct.data;
   const eeV4RoundId   = readU64(cfgData, 88);
   const currentRound  = readU64(cfgData, 72);
-  const insuranceFund = new PublicKey(cfgData.slice(40, 72));
   const poolEntropy   = Buffer.from(poolAcct.data.slice(8, 40));
 
   console.log(`\n── Round ${currentRound} / EE ${eeV4RoundId} ──────────────────────────`);
@@ -576,7 +575,7 @@ async function runOnce() {
       const claimed = vrAcctFresh.data[80] !== 0;
       if (!claimed) {
         try {
-          await send(ixClaimReward(eeRoundPubkey, currentRound, insuranceFund), "claim_validator_reward");
+          await send(ixClaimReward(eeRoundPubkey, currentRound), "claim_validator_reward");
         } catch (e) {
           if (e.message?.includes("RewardAlreadyClaimed")) {
             console.log("  Reward already claimed");
