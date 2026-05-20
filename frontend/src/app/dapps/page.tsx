@@ -332,7 +332,7 @@ export default function DappsPage() {
 
   useEffect(() => {
     fetchDapps();
-    const iv = setInterval(fetchDapps, 10000);
+    const iv = setInterval(fetchDapps, 30_000);
     return () => clearInterval(iv);
   }, [fetchDapps]);
 

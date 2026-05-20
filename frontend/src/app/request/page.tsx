@@ -60,7 +60,7 @@ export default function RequestPage() {
       }
     };
     fetchStatus();
-    const iv = setInterval(fetchStatus, 3000);
+    const iv = setInterval(fetchStatus, 15_000);
     return () => clearInterval(iv);
   }, [client]);
 

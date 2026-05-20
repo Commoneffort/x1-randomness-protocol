@@ -37,12 +37,9 @@ export default function ValidatorsPage() {
     try {
       const vrs = await client.getValidatorReveals(publicKey);
       setReveals(vrs);
-      const escrowMap: Record<number, FeeEscrow | null> = {};
-      await Promise.all(vrs.map(async vr => {
-        if (!(vr.protocolRound in escrowMap)) {
-          escrowMap[vr.protocolRound] = await client.getFeeEscrow(vr.protocolRound);
-        }
-      }));
+      // Deduplicate rounds then fetch all escrows in one getMultipleAccountsInfo call
+      const uniqueRounds = Array.from(new Set(vrs.map(vr => vr.protocolRound)));
+      const escrowMap = await client.getMultipleFeeEscrows(uniqueRounds);
       setEscrows(escrowMap);
     } finally {
       setLoading(false);
@@ -433,6 +430,8 @@ node run-round.js --loop`}</pre>
                         <span className="text-xs px-2 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200">Claimed</span>
                       ) : escrow?.feeDistributed ? (
                         <span className="text-xs px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">Claimable</span>
+                      ) : (!escrow?.pendingFees && !escrow?.originalFees) ? (
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-surface-elevated text-text-muted border border-border">Empty Round</span>
                       ) : (
                         <span className="text-xs px-2 py-0.5 rounded-full bg-yellow-50 text-yellow-700 border border-yellow-200">Awaiting Distribution</span>
                       )}
@@ -442,7 +441,7 @@ node run-round.js --loop`}</pre>
                     </p>
                     {escrow && !vr.claimed && escrow.originalFees > 0 && (
                       <p className="text-xs text-text-secondary mt-0.5">
-                        Est. share ≈ {client.formatXnt(Math.floor(escrow.originalFees * 90 / 100))} XNT ÷ reveal_count
+                        Est. share ≈ {client.formatXnt(Math.floor(escrow.originalFees * 95 / 100))} XNT ÷ reveal_count
                       </p>
                     )}
                   </div>

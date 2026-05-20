@@ -25,6 +25,13 @@ function EscrowBadge({ escrow }: { escrow: FeeEscrow | null }) {
       </span>
     );
   }
+  if (!escrow.pendingFees && !escrow.originalFees) {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-surface-elevated text-text-muted border border-border">
+        Empty Round
+      </span>
+    );
+  }
   return (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-surface-elevated text-text-secondary border border-border">
       Held
@@ -48,18 +55,15 @@ export default function RoundsPage() {
     setCurrentSlot(slot);
     setRounds(wrs);
 
-    // Fetch fee escrows in parallel
-    const escrowMap: Record<number, FeeEscrow | null> = {};
-    await Promise.all(wrs.map(async wr => {
-      escrowMap[wr.round] = await client.getFeeEscrow(wr.round);
-    }));
+    // Single getMultipleAccountsInfo call instead of N parallel getAccountInfo calls
+    const escrowMap = await client.getMultipleFeeEscrows(wrs.map(wr => wr.round));
     setEscrows(escrowMap);
     setLoading(false);
   };
 
   useEffect(() => {
     fetchData();
-    const iv = setInterval(fetchData, 5000);
+    const iv = setInterval(fetchData, 30_000);
     return () => clearInterval(iv);
   }, [client]);
 
@@ -177,7 +181,7 @@ export default function RoundsPage() {
                           </div>
                           <div className="p-3 bg-surface-elevated rounded-lg">
                             <p className="text-xs text-text-muted">Fee Status</p>
-                            <p className="text-sm text-text-primary">{escrow.feeDistributed ? "Distributed (95% validators + 5% crank)" : "Held (pending distribution)"}</p>
+                            <p className="text-sm text-text-primary">{escrow.feeDistributed ? "Distributed (95% validators + 5% crank)" : (!escrow.pendingFees && !escrow.originalFees) ? "Empty round — no requests" : "Held (pending distribution)"}</p>
                           </div>
                         </>
                       )}

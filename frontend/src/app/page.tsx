@@ -72,40 +72,41 @@ function PoolStatus({ pool, currentSlot }: { pool: EntropyPool; currentSlot: num
 }
 
 async function fetchCrankRunners(): Promise<string[]> {
-  // Use ProtocolClient's connection so the rate-limit-aware fetch is applied
   const client = new ProtocolClient();
   const conn = client.connection;
   const programId = new PublicKey(PROGRAM_ID);
   const disc = DISC.distribute_fees;
 
-  const sigs = await conn.getSignaturesForAddress(programId, { limit: 300 });
+  // Limit to 50 sigs — one batch fetch, avoids 429 on the public RPC.
+  // 50 program txs covers many rounds at any realistic request rate.
+  const sigs = await conn.getSignaturesForAddress(programId, { limit: 25 });
   if (!sigs.length) return [];
 
-  // Batch fetch in groups of 50
   const seen = new Set<string>();
-  for (let i = 0; i < sigs.length; i += 50) {
-    const batch = sigs.slice(i, i + 50).map(s => s.signature);
-    const txs = await conn.getTransactions(batch, { maxSupportedTransactionVersion: 0 });
-    for (const tx of txs) {
-      if (!tx?.transaction) continue;
-      const msg = tx.transaction.message;
-      const instructions = "compiledInstructions" in msg
-        ? msg.compiledInstructions
-        : (msg as { instructions: { programIdIndex: number; accountKeyIndexes: number[]; data: Uint8Array }[] }).instructions;
-      const keys = tx.transaction.message.staticAccountKeys ?? tx.transaction.message.getAccountKeys?.().staticAccountKeys ?? [];
+  const txs = await conn.getTransactions(
+    sigs.map(s => s.signature),
+    { maxSupportedTransactionVersion: 0 },
+  );
 
-      for (const ix of instructions) {
-        const data = ix.data instanceof Uint8Array ? ix.data : Uint8Array.from(Buffer.from(ix.data as string, "base64"));
-        if (data.length < 8) continue;
-        if (!disc.every((b, i) => data[i] === b)) continue;
-        // distribute_fees V4.4+: 6 accounts, index 4 = crank signer.
-        // Pre-V4.4 had 5 accounts (no crank); index 4 was SystemProgram — skip those.
-        const accounts = "accountKeyIndexes" in ix ? ix.accountKeyIndexes : (ix as { accounts: number[] }).accounts;
-        if (accounts.length >= 6) {
-          const crankKey = keys[accounts[4]];
-          if (crankKey) seen.add(crankKey.toString());
-        }
-      }
+  for (const tx of txs) {
+    if (!tx?.transaction) continue;
+    const msg = tx.transaction.message;
+    const instructions = "compiledInstructions" in msg
+      ? msg.compiledInstructions
+      : (msg as { instructions: { programIdIndex: number; accountKeyIndexes: number[]; data: Uint8Array }[] }).instructions;
+    const keys = msg.staticAccountKeys ?? (msg as { getAccountKeys?: () => { staticAccountKeys: unknown[] } }).getAccountKeys?.().staticAccountKeys ?? [];
+
+    for (const ix of instructions) {
+      const data = ix.data instanceof Uint8Array ? ix.data : Uint8Array.from(Buffer.from(ix.data as string, "base64"));
+      if (data.length < 8) continue;
+      if (!disc.every((b, i) => data[i] === b)) continue;
+      const accounts = "accountKeyIndexes" in ix ? ix.accountKeyIndexes : (ix as { accounts: number[] }).accounts;
+      // V4.5: 5 accounts — [protocolConfig, wrapperRound, feeEscrow, crank(3), systemProgram]
+      // V4.4: 6 accounts — [protocolConfig, wrapperRound, feeEscrow, insuranceFund, crank(4), systemProgram]
+      let crankKey: unknown;
+      if (accounts.length === 5) crankKey = (keys as unknown[])[accounts[3]];
+      else if (accounts.length >= 6) crankKey = (keys as unknown[])[accounts[4]];
+      if (crankKey) seen.add(crankKey.toString());
     }
   }
   return Array.from(seen);
@@ -117,6 +118,7 @@ export default function DashboardPage() {
   const [currentSlot, setCurrentSlot] = useState(0);
   const [loading, setLoading] = useState(true);
   const [crankRunners, setCrankRunners] = useState<string[]>([]);
+  const [crankScanning, setCrankScanning] = useState(true);
   const [validatorMap, setValidatorMap] = useState<Map<string, ValidatorRegistration>>(new Map());
 
   const [client] = useState(() => new ProtocolClient());
@@ -140,10 +142,13 @@ export default function DashboardPage() {
 
   useEffect(() => {
     fetchData();
-    const iv = setInterval(fetchData, 3000);
+    const iv = setInterval(fetchData, 15_000);
     // Crank runners + validator registry change rarely — fetch once, refresh every 2 min
     const refreshCrankData = () => {
-      fetchCrankRunners().then(setCrankRunners).catch(console.error);
+      fetchCrankRunners()
+        .then(setCrankRunners)
+        .catch(() => setCrankRunners([]))
+        .finally(() => setCrankScanning(false));
       client.getAllValidatorRegistrations()
         .then(vals => setValidatorMap(new Map(vals.map(v => [v.identity, v]))))
         .catch(console.error);
@@ -204,10 +209,12 @@ export default function DashboardPage() {
       <div className="card">
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-lg font-semibold text-text-primary">Crank Runners</h2>
-          <span className="text-xs text-text-muted">last 300 txs</span>
+          <span className="text-xs text-text-muted">last 25 txs</span>
         </div>
-        {crankRunners.length === 0 ? (
+        {crankScanning ? (
           <p className="text-sm text-text-muted">Scanning recent transactions…</p>
+        ) : crankRunners.length === 0 ? (
+          <p className="text-sm text-text-muted">No <code className="font-mono text-xs bg-surface-elevated px-1 rounded">distribute_fees</code> calls found in last 25 transactions.</p>
         ) : (
           <div className="space-y-2">
             <p className="text-sm text-text-secondary">

@@ -198,7 +198,7 @@ export default function DocsPage() {
                 size: "113 bytes",
                 fields: [
                   ["8–39", "authority", "Pubkey"],
-                  ["40–71", "insurance_fund", "Pubkey"],
+                  ["40–71", "insurance_fund", "Pubkey — kept for layout compatibility; not used since V4.5"],
                   ["72–79", "current_round", "u64"],
                   ["80–87", "current_round_start_slot", "u64"],
                   ["88–95", "ee_v4_round_id", "u64"],
@@ -243,7 +243,7 @@ export default function DocsPage() {
                 fields: [
                   ["8–15", "pending_fees", "u64 (lamports)"],
                   ["16–23", "round", "u64"],
-                  ["24–31", "original_fees", "u64 — total before insurance cut"],
+                  ["24–31", "original_fees", "u64 — total fees before crank cut (V4.5)"],
                   ["32–39", "ee_v4_round_id", "u64 — EE V4 round that services this protocol round"],
                   ["40", "fee_distributed", "bool"],
                   ["41", "bump", "u8"],

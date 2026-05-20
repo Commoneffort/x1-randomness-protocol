@@ -14,30 +14,28 @@ async function rateLimitFetch(
   input: RequestInfo | URL,
   init?: RequestInit
 ): Promise<Response> {
-  let delay = 500; // fallback if no header
+  let backoffMs = 500; // only grows when server gives no Retry-After header
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const res = await fetch(input, init);
     if (res.status !== 429) return res;
+    if (attempt === MAX_RETRIES) return res;
 
-    // Read the most specific header available
-    const retryAfterMs =
-      res.headers.get("x-ratelimit-reset-ms") ??
-      res.headers.get("x-ratelimit-reset");
-    const retryAfterSec = res.headers.get("retry-after");
+    // Prefer the most specific header the server provides.
+    // Only fall back to doubling backoff when the server gives us nothing.
+    const resetMs  = res.headers.get("x-ratelimit-reset-ms") ?? res.headers.get("x-ratelimit-reset");
+    const retrySec = res.headers.get("retry-after");
+    let waitMs: number | null = null;
+    if (resetMs)   { const v = Number(resetMs);   if (Number.isFinite(v) && v > 0) waitMs = v;          }
+    if (!waitMs && retrySec) { const v = Number(retrySec); if (Number.isFinite(v) && v > 0) waitMs = v * 1000; }
 
-    if (retryAfterMs) {
-      const resetMs = Number(retryAfterMs);
-      delay = Number.isFinite(resetMs) ? Math.max(resetMs, 100) : delay;
-    } else if (retryAfterSec) {
-      const secs = Number(retryAfterSec);
-      delay = Number.isFinite(secs) ? Math.max(secs * 1000, 100) : delay;
+    if (waitMs !== null) {
+      await new Promise(r => setTimeout(r, waitMs));
+      // Server told us exactly how long — don't grow backoff for next fallback
+    } else {
+      await new Promise(r => setTimeout(r, backoffMs));
+      backoffMs = Math.min(backoffMs * 2, 10_000);
     }
-
-    if (attempt === MAX_RETRIES) return res; // let caller handle the final 429
-    await new Promise(r => setTimeout(r, delay));
-    delay = Math.min(delay * 2, 10_000); // cap backoff at 10s
   }
-  // unreachable but satisfies TypeScript
   return fetch(input, init);
 }
 import {
@@ -235,6 +233,27 @@ export class ProtocolClient {
     const [pda] = findFeeEscrowPda(round);
     const d = await this.fetchRaw(pda);
     if (!d || d.length < 42) return null;
+    return this.parseFeeEscrow(d, pda);
+  }
+
+  // Fetch multiple escrows in a single getMultipleAccountsInfo call instead of N parallel getAccountInfo calls.
+  async getMultipleFeeEscrows(rounds: number[]): Promise<Record<number, FeeEscrow | null>> {
+    if (!rounds.length) return {};
+    try {
+      const pdas = rounds.map(r => findFeeEscrowPda(r)[0]);
+      const infos = await this.connection.getMultipleAccountsInfo(pdas, "confirmed");
+      const result: Record<number, FeeEscrow | null> = {};
+      infos.forEach((info, i) => {
+        const d = info ? Buffer.from(info.data) : null;
+        result[rounds[i]] = (d && d.length >= 42) ? this.parseFeeEscrow(d, pdas[i]) : null;
+      });
+      return result;
+    } catch {
+      return {};
+    }
+  }
+
+  private parseFeeEscrow(d: Buffer, pda: PublicKey): FeeEscrow {
     return {
       pendingFees:    readU64(d, 8),
       round:          readU64(d, 16),
@@ -288,36 +307,39 @@ export class ProtocolClient {
   }
 
   async getAllWrapperRounds(limit = 15): Promise<WrapperRound[]> {
-    const config = await this.getProtocolConfig();
-    if (!config) return [];
-    const roundNums: number[] = [];
-    for (let i = 0; i < limit; i++) {
-      const n = config.currentRound - i;
-      if (n < 0) break;
-      roundNums.push(n);
+    try {
+      const config = await this.getProtocolConfig();
+      if (!config) return [];
+      const roundNums: number[] = [];
+      for (let i = 0; i < limit; i++) {
+        const n = config.currentRound - i;
+        if (n < 0) break;
+        roundNums.push(n);
+      }
+      const pdas = roundNums.map(n => findWrapperRoundPda(n)[0]);
+      const infos = await this.connection.getMultipleAccountsInfo(pdas, "confirmed");
+      return infos
+        .map((info, idx) => {
+          if (!info || info.data.length < 87) return null;
+          const d = Buffer.from(info.data);
+          return {
+            round:               readU64(d, 8),
+            eeV4RoundId:         readU64(d, 16),
+            startSlot:           readU64(d, 24),
+            aggregated:          readBool(d, 32),
+            aggregatedSlot:      readU64(d, 33),
+            entropyOutput:       readHex(d, 41, 32),
+            pendingRequests:     d.readUInt32LE(73),
+            totalFees:           readU64(d, 77),
+            eeV4EntropyIncluded: readBool(d, 85),
+            bump:                d[86],
+            pubkey:              pdas[idx].toBase58(),
+          } as WrapperRound;
+        })
+        .filter((wr): wr is WrapperRound => wr !== null);
+    } catch {
+      return [];
     }
-    // Fetch all PDAs in one RPC call instead of N sequential calls
-    const pdas = roundNums.map(n => findWrapperRoundPda(n)[0]);
-    const infos = await this.connection.getMultipleAccountsInfo(pdas, "confirmed");
-    return infos
-      .map((info, idx) => {
-        if (!info || info.data.length < 87) return null;
-        const d = Buffer.from(info.data);
-        return {
-          round:               readU64(d, 8),
-          eeV4RoundId:         readU64(d, 16),
-          startSlot:           readU64(d, 24),
-          aggregated:          readBool(d, 32),
-          aggregatedSlot:      readU64(d, 33),
-          entropyOutput:       readHex(d, 41, 32),
-          pendingRequests:     d.readUInt32LE(73),
-          totalFees:           readU64(d, 77),
-          eeV4EntropyIncluded: readBool(d, 85),
-          bump:                d[86],
-          pubkey:              pdas[idx].toBase58(),
-        } as WrapperRound;
-      })
-      .filter((wr): wr is WrapperRound => wr !== null);
   }
 
   async getRequestState(requestPda: PublicKey): Promise<RequestState | null> {
