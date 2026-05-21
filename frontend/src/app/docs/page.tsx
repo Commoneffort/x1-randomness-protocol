@@ -370,7 +370,7 @@ export default function DocsPage() {
               { label: "Game seed fee", value: `${GAME_SEED_FEE_LAMPORTS / 1e9} XNT — flows to validators just like request fees` },
               { label: "EE V4 commit stake", value: `${EE_V4_STAKE_LAMPORTS / 1e9} XNT (returned on valid reveal)` },
               { label: "Validator share", value: `${FEE_VALIDATORS_PCT}% of round fees ÷ reveal_count` },
-              { label: "Crank reward", value: `${FEE_CRANK_PCT}% to distribute_fees caller (V4.4)` },
+              { label: "Crank reward", value: `${FEE_CRANK_PCT}% to distribute_fees caller (V4.5)` },
             ].map(({ label, value }) => (
               <div key={label} className="p-3 bg-surface-elevated rounded-lg border border-border">
                 <p className="text-xs text-text-muted">{label}</p>
