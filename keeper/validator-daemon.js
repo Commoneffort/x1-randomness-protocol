@@ -97,6 +97,9 @@ async function send(ix, label) {
       return sig;
     } catch (e) {
       lastErr = e;
+      // Don't retry deterministic simulation failures — they'll always fail the same way.
+      const errText = e.message + JSON.stringify(e.logs ?? []);
+      if (errText.includes("custom program error") || errText.includes("Error processing Instruction")) break;
       if (attempt < MAX_ATTEMPTS) {
         console.warn(`  ⚠ ${label} attempt ${attempt} failed: ${e.message} — retrying in 5s`);
         await new Promise(r => setTimeout(r, 5000));
@@ -281,16 +284,16 @@ function ixCancelEeRound(eeRoundPubkey, contributorPubkeys) {
 }
 
 function ixClaimReward(eeRound, protocolRound) {
-  const [cfg]    = cfgPda();
   const [escrow] = escrowPda(protocolRound);
   const [vr]     = vrPda(eeRound, identity.publicKey);
+  // Account order must match ClaimValidatorReward struct:
+  // validator_reveal, fee_escrow, ee_round, contributor
   return new TransactionInstruction({ programId: PROGRAM_ID,
     keys: [
-      { pubkey: identity.publicKey, isSigner: true,  isWritable: true  },
       { pubkey: vr,                 isSigner: false, isWritable: true  },
       { pubkey: escrow,             isSigner: false, isWritable: true  },
-      { pubkey: cfg,                isSigner: false, isWritable: false },
       { pubkey: eeRound,            isSigner: false, isWritable: false },
+      { pubkey: identity.publicKey, isSigner: true,  isWritable: true  },
     ],
     data: disc("claim_validator_reward"),
   });
@@ -449,6 +452,26 @@ async function runOnce() {
         console.log("  Config advanced before commit landed — round changed mid-cycle, retrying next poll");
         clearSecrets();
         return;
+      } else if ([e.message, ...(e.logs ?? [])].some(s => s?.includes("0x1771") || s?.includes("WrongPhase"))) {
+        // WrongPhase on commit means the round is in RevealPhase. Check if we actually
+        // committed — another validator may have filled both slots before us.
+        const eeDataFresh = (await conn.getAccountInfo(eeRoundPubkey))?.data;
+        const commitCount = eeDataFresh ? eeDataFresh[74] : 0;
+        let isContributor = false;
+        for (let i = 0; i < commitCount; i++) {
+          const base = 158 + i * 68;
+          if (eeDataFresh && new PublicKey(eeDataFresh.slice(base, base + 32)).equals(identity.publicKey)) {
+            isContributor = true;
+            break;
+          }
+        }
+        if (isContributor) {
+          console.log("  WrongPhase — commit confirmed, round moved to RevealPhase");
+        } else {
+          console.log("  WrongPhase — another pair filled EE round — not a contributor, clearing secrets");
+          clearSecrets();
+          return;
+        }
       } else {
         throw e;
       }
@@ -564,31 +587,78 @@ async function runOnce() {
     clearSecrets();
   }
 
-  // ── Claim reward ────────────────────────────────────────────────────────────
-  // Check if fees have been distributed for the protocol round linked to this EE round
-  const [escrowAddr] = escrowPda(currentRound);
-  const escrowAcct   = await conn.getAccountInfo(escrowAddr);
-  if (escrowAcct && escrowAcct.data.length >= 42) {
-    const feeDistributed = escrowAcct.data[40] !== 0;
-    const vrAcctFresh    = await conn.getAccountInfo(vrAddr);
-    if (feeDistributed && vrAcctFresh && vrAcctFresh.data.length >= 82) {
-      const claimed = vrAcctFresh.data[80] !== 0;
-      if (!claimed) {
-        try {
-          await send(ixClaimReward(eeRoundPubkey, currentRound), "claim_validator_reward");
-        } catch (e) {
-          if (e.message?.includes("RewardAlreadyClaimed")) {
-            console.log("  Reward already claimed");
-          } else { console.warn(`  Claim failed: ${e.message}`); }
-        }
-      } else {
-        console.log("  Reward already claimed for this round");
-      }
-    } else if (!feeDistributed) {
-      console.log("  Fees not yet distributed — will claim after distribute_fees runs");
-    }
+  // ── Claim rewards (sweep all unclaimed) ─────────────────────────────────────
+  await sweepUnclaimedRewards();
+
+}
+
+// ── Sweep unclaimed validator rewards ──────────────────────────────────────────
+// The crank advances the round immediately after distribute_fees, so by the time
+// the daemon polls, currentRound is already N+1. We must scan ALL unclaimed
+// ValidatorReveal PDAs for this validator and claim any with fees distributed.
+async function sweepUnclaimedRewards() {
+  const bs58 = require("bs58");
+  const REVEAL_DISC = crypto.createHash("sha256")
+    .update("account:ValidatorReveal").digest().slice(0, 8);
+
+  const myReveals = await conn.getProgramAccounts(PROGRAM_ID, {
+    filters: [
+      { memcmp: { offset: 0,  bytes: bs58.encode(REVEAL_DISC) } },
+      { memcmp: { offset: 8,  bytes: identity.publicKey.toBase58() } },
+      { memcmp: { offset: 80, bytes: bs58.encode(Buffer.from([0])) } }, // claimed=false
+    ],
+  });
+  if (!myReveals.length) return;
+
+  // Batch-fetch all fee escrows (chunks of 100 — RPC limit)
+  const escrowAddrs = myReveals.map(r => escrowPda(readU64(r.account.data, 72))[0]);
+  const escrowAccts = [];
+  for (let i = 0; i < escrowAddrs.length; i += 100) {
+    const chunk = await conn.getMultipleAccountsInfo(escrowAddrs.slice(i, i + 100));
+    escrowAccts.push(...chunk);
   }
 
+  let claimed = 0;
+  for (let i = 0; i < myReveals.length; i++) {
+    const d  = myReveals[i].account.data;
+    const ea = escrowAccts[i];
+    if (!ea || ea.data.length < 42) continue;
+    const feeDistributed = ea.data[40] !== 0;
+    const originalFees   = Number(ea.data.readBigUInt64LE(24));
+    if (!feeDistributed || originalFees === 0) continue;
+
+    const eeRoundKey    = new PublicKey(d.slice(40, 72));
+    const protocolRound = readU64(d, 72);
+    const vrPubkey      = myReveals[i].pubkey;
+    const [escrow]      = escrowPda(protocolRound);
+    // Build claim IX with actual vr pubkey (already fetched — no recomputation needed)
+    const claimIx = new TransactionInstruction({ programId: PROGRAM_ID,
+      keys: [
+        { pubkey: vrPubkey,           isSigner: false, isWritable: true  },
+        { pubkey: escrow,             isSigner: false, isWritable: true  },
+        { pubkey: eeRoundKey,         isSigner: false, isWritable: false },
+        { pubkey: identity.publicKey, isSigner: true,  isWritable: true  },
+      ],
+      data: disc("claim_validator_reward"),
+    });
+    try {
+      await send(claimIx, `claim_validator_reward(round=${protocolRound})`);
+      claimed++;
+    } catch (e) {
+      if (!e.message?.includes("RewardAlreadyClaimed") && !e.message?.includes("already")) {
+        console.warn(`  Sweep claim failed for round ${protocolRound}: ${e.message}`);
+      }
+    }
+  }
+  if (claimed === 0 && myReveals.length > 0) {
+    const withFees = myReveals.filter((_, i) => {
+      const ea = escrowAccts[i];
+      return ea && ea.data.length >= 42 && ea.data[40] !== 0 && Number(ea.data.readBigUInt64LE(24)) > 0;
+    }).length;
+    if (withFees === 0) {
+      console.log(`  ${myReveals.length} unclaimed reveal(s) — all empty rounds, no fees to collect`);
+    }
+  }
 }
 
 // ── Registration helpers ────────────────────────────────────────────────────────
