@@ -46,6 +46,7 @@ const {
 } = require("@solana/web3.js");
 const crypto = require("crypto");
 const fs     = require("fs");
+const bs58   = require("bs58");
 
 const STAKE_PROG = new PublicKey("Stake11111111111111111111111111111111111111");
 
@@ -119,7 +120,6 @@ function wrapperPda(r)  { return findPda([Buffer.from("wrapper-round"),     u64l
 // Returns true if there is work that requires a new EE round:
 // either the pool is stale (fast-path blocked) or there are queued unfulfilled requests.
 async function shouldRunEeRound() {
-  const bs58 = require("bs58");
   const REQUEST_DISC = Buffer.from([106, 141, 109, 114, 88, 187, 109, 5]);
   const [pAddr] = poolPda();
   const poolData    = (await conn.getAccountInfo(pAddr)).data;
@@ -352,7 +352,16 @@ async function runOnce() {
     console.log(`  EE round ${eeV4RoundId} not initialised — calling init_ee_round as coordinator`);
     try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status"); } catch (_) {}
     const { ix: initIx, eeRoundPubkey: newEeRoundPubkey } = ixInitEeRound(identity.publicKey, voteAccount, stakeAccount, eeV4RoundId);
-    await send(initIx, `init_ee_round(id=${eeV4RoundId})`);
+    try {
+      await send(initIx, `init_ee_round(id=${eeV4RoundId})`);
+    } catch (initErr) {
+      // Another validator may have raced and won — check if the wrapper exists now.
+      if (await conn.getAccountInfo(eeWrAddr)) {
+        console.log(`  init_ee_round raced — another validator won, they will commit`);
+        return;
+      }
+      throw initErr;
+    }
     console.log(`  ✓ n=2, m=2, binding_slot=current+675 (derived on-chain)`);
     // Commit immediately — don't wait for the next poll; the 200-slot window (~75s)
     // can expire before the next iteration, especially if getProgramAccounts is slow.
@@ -374,7 +383,7 @@ async function runOnce() {
   try {
     // round_id (u64 LE) is at offset 40 in the EE round account (after 8-byte disc + 32-byte coordinator)
     const roundIdBytes = u64le(eeV4RoundId);
-    const roundIdBase58 = require("bs58").encode(roundIdBytes);
+    const roundIdBase58 = bs58.encode(roundIdBytes);
     const eeAccounts = await conn.getProgramAccounts(EE_V4, {
       filters: [
         { dataSize: 838 },
@@ -531,8 +540,17 @@ async function runOnce() {
         } else {
           console.log(`  EE round ${eeV4RoundId} done (status=${eeStatus}) — opening next EE round ${nextEeId}`);
           try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status"); } catch (_) {}
+          const [nextEeWrAddr] = wrapperPda(nextEeId);
           const { ix: initIx, eeRoundPubkey: newEeRoundPubkey } = ixInitEeRound(identity.publicKey, voteAccount, stakeAccount, nextEeId);
-          await send(initIx, `init_ee_round(id=${nextEeId})`);
+          try {
+            await send(initIx, `init_ee_round(id=${nextEeId})`);
+          } catch (initErr) {
+            if (await conn.getAccountInfo(nextEeWrAddr)) {
+              console.log(`  init_ee_round raced — another validator won, they will commit`);
+              return;
+            }
+            throw initErr;
+          }
           console.log(`  ✓ EE round ${nextEeId} opened — n=2, m=2, binding_slot=current+675`);
           // Commit immediately — don't return and wait for the next poll, the
           // 200-slot commit window (~75s) can expire before the daemon polls again.
@@ -556,13 +574,16 @@ async function runOnce() {
   }
 
   // ── Reveal phase ────────────────────────────────────────────────────────────
-  // Only attempt reveal when the EE round is in RevealPhase (status=1).
-  // Cancelled (3) or CommitPhase-but-deadline-passed (0) rounds must not be revealed.
+  // Only attempt reveal when:
+  //   - past commit_deadline (RevealPhase has started)
+  //   - before binding_slot (reveal_deadline = init+600 < binding_slot = init+675)
+  //   - EE round status is RevealPhase (1)
+  // Attempting reveal past binding_slot always fails (reveal window closed).
   const eeRoundStatus = eeAcct.data[140];
-  if (!beforeCommitDeadline && !revealed && eeRoundStatus === 1) {
+  if (!beforeCommitDeadline && !pastBinding && !revealed && eeRoundStatus === 1) {
     const secrets = loadSecrets(eeV4RoundId);
     if (!secrets) {
-      console.log("  Past binding slot but no secrets found — missed reveal window");
+      console.log("  In reveal window but no secrets found — missed commit phase");
       return;
     }
     try {
@@ -571,6 +592,10 @@ async function runOnce() {
     } catch (e) {
       if (e.message?.includes("already") || e.message?.includes("0x0")) {
         console.log("  Already revealed");
+        clearSecrets();
+      } else if ([e.message, ...(e.logs ?? [])].some(s => s?.includes("0x1771") || s?.includes("WrongPhase"))) {
+        // Round transitioned out of RevealPhase between our check and the tx landing.
+        console.log("  WrongPhase on reveal — round no longer in RevealPhase, clearing secrets");
         clearSecrets();
       } else { throw e; }
     }
@@ -597,7 +622,6 @@ async function runOnce() {
 // the daemon polls, currentRound is already N+1. We must scan ALL unclaimed
 // ValidatorReveal PDAs for this validator and claim any with fees distributed.
 async function sweepUnclaimedRewards() {
-  const bs58 = require("bs58");
   const REVEAL_DISC = crypto.createHash("sha256")
     .update("account:ValidatorReveal").digest().slice(0, 8);
 
@@ -630,12 +654,11 @@ async function sweepUnclaimedRewards() {
     const eeRoundKey    = new PublicKey(d.slice(40, 72));
     const protocolRound = readU64(d, 72);
     const vrPubkey      = myReveals[i].pubkey;
-    const [escrow]      = escrowPda(protocolRound);
-    // Build claim IX with actual vr pubkey (already fetched — no recomputation needed)
+    const escrowPubkey  = escrowAddrs[i];
     const claimIx = new TransactionInstruction({ programId: PROGRAM_ID,
       keys: [
         { pubkey: vrPubkey,           isSigner: false, isWritable: true  },
-        { pubkey: escrow,             isSigner: false, isWritable: true  },
+        { pubkey: escrowPubkey,       isSigner: false, isWritable: true  },
         { pubkey: eeRoundKey,         isSigner: false, isWritable: false },
         { pubkey: identity.publicKey, isSigner: true,  isWritable: true  },
       ],

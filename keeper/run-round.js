@@ -54,10 +54,11 @@ const {
 const crypto = require("crypto");
 const fs     = require("fs");
 const os     = require("os");
+const bs58   = require("bs58");
 
 // ── Config ─────────────────────────────────────────────────────────────────────
 
-const RPC        = "https://rpc.mainnet.x1.xyz";
+const RPC        = process.env.RPC_URL || "https://rpc.mainnet.x1.xyz";
 const PROGRAM_ID = new PublicKey("BSKTJpgAGHRaSMLA88chYPKuSuD9qbesEcHYmUrBWU7R");
 const EE_V4      = new PublicKey("FDyWtM9UBNfXNuc5oZJ1V86d3dz635WnqMfX8x5Uifbm");
 const STAKE_PROG = new PublicKey("Stake11111111111111111111111111111111111111");
@@ -90,14 +91,29 @@ function valRegPda(identity) {
 }
 
 async function send(ix, signers, label) {
-  const tx = new Transaction();
-  if (Array.isArray(ix)) { ix.forEach(i => tx.add(i)); } else { tx.add(ix); }
-  tx.feePayer = payer.publicKey;
-  const { blockhash } = await conn.getLatestBlockhash("confirmed");
-  tx.recentBlockhash = blockhash;
-  const sig = await sendAndConfirmTransaction(conn, tx, signers, { commitment: "confirmed" });
-  console.log(`  ✓ ${label}: ${sig.slice(0, 20)}…`);
-  return sig;
+  const MAX_ATTEMPTS = 3;
+  let lastErr;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const tx = new Transaction();
+      if (Array.isArray(ix)) { ix.forEach(i => tx.add(i)); } else { tx.add(ix); }
+      tx.feePayer = payer.publicKey;
+      const { blockhash } = await conn.getLatestBlockhash("confirmed");
+      tx.recentBlockhash = blockhash;
+      const sig = await sendAndConfirmTransaction(conn, tx, signers, { commitment: "confirmed" });
+      console.log(`  ✓ ${label}: ${sig.slice(0, 20)}…`);
+      return sig;
+    } catch (e) {
+      lastErr = e;
+      const errText = e.message + JSON.stringify(e.logs ?? []);
+      if (errText.includes("custom program error") || errText.includes("Error processing Instruction")) break;
+      if (attempt < MAX_ATTEMPTS) {
+        console.warn(`  ⚠ ${label} attempt ${attempt} failed: ${e.message} — retrying in 5s`);
+        await new Promise(r => setTimeout(r, 5000));
+      }
+    }
+  }
+  throw lastErr;
 }
 
 function readU64(d, o) { return Number(d.readBigUInt64LE(o)); }
@@ -128,17 +144,6 @@ async function getValidatorVoteAndStake(identity) {
     stake:        stakeAccts[0].account.lamports,
     lastVote:     entry.lastVote,
   };
-}
-
-async function getRegisteredAccounts(identity) {
-  const [regPda] = valRegPda(identity);
-  const acct = await conn.getAccountInfo(regPda);
-  if (!acct) throw new Error(`${identity.toBase58().slice(0, 12)}… not registered`);
-  const vote   = new PublicKey(acct.data.slice(40, 72));
-  const stake  = new PublicKey(acct.data.slice(72, 104));
-  const active = acct.data[137] !== 0;
-  if (!active) throw new Error(`Validator ${identity.toBase58().slice(0, 12)}… is inactive — run refresh_validator_status first`);
-  return { voteAccount: vote, stakeAccount: stake };
 }
 
 // ── Instructions ───────────────────────────────────────────────────────────────
@@ -199,35 +204,6 @@ function ixCreateFeeEscrow(round) {
     ],
     data: Buffer.concat([disc("create_fee_escrow"), u64le(round)]),
   });
-}
-
-// init_ee_round: n, m, and binding_slot are now derived on-chain from protocol
-// constants (MAX_COMMITTEE_SIZE=10, MIN_EE_M_THRESHOLD=2, EE_V4_MIN_BINDING_SLOTS=675).
-// The payer acts as coordinator — it pays rent for the EE round PDA but has no
-// special authority over the round outcome.
-function ixInitEeRound(coordinatorKey, coordinatorVote, coordinatorStake, eeRoundId) {
-  const [cfg] = cfgPda();
-  const [wr]  = wrapperPda(eeRoundId);
-  const [eer] = eeRoundPda(coordinatorKey, eeRoundId);
-  const [reg] = valRegPda(coordinatorKey);
-  return {
-    ix: new TransactionInstruction({ programId: PROGRAM_ID,
-      keys: [
-        { pubkey: cfg,                     isSigner: false, isWritable: true },
-        { pubkey: wr,                      isSigner: false, isWritable: true },
-        { pubkey: eer,                     isSigner: false, isWritable: true },
-        { pubkey: coordinatorKey,          isSigner: true,  isWritable: true },
-        { pubkey: reg,                     isSigner: false, isWritable: false },
-        { pubkey: coordinatorVote,         isSigner: false, isWritable: false },
-        { pubkey: coordinatorStake,        isSigner: false, isWritable: false },
-        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-        { pubkey: EE_V4,                   isSigner: false, isWritable: false },
-      ],
-      // Only ee_round_id arg — n/m/binding_slot derived on-chain
-      data: Buffer.concat([disc("init_ee_round"), u64le(eeRoundId)]),
-    }),
-    eeRoundPubkey: eer,
-  };
 }
 
 function ixFinalizeViaEe(eeRoundId, eeRound) {
@@ -322,7 +298,6 @@ async function runRound() {
 
   // ── Helper: locate the actual EE round PDA on EE_V4 (coordinator unknown) ─
   async function findEeRoundPubkey(eeId) {
-    const bs58 = require("bs58");
     const accts = await conn.getProgramAccounts(EE_V4, {
       filters: [{ dataSize: 838 }, { memcmp: { offset: 40, bytes: bs58.encode(u64le(eeId)) } }],
     });
@@ -344,11 +319,12 @@ async function runRound() {
     // Wait for EE round thisEeId WrapperRound (created by validator daemon's init_ee_round)
     console.log(`  Waiting for validator daemon to init EE round ${thisEeId}…`);
     const [eeWrAddr] = wrapperPda(thisEeId);
-    let waited = false;
+    let waited = false; let pollCount = 0;
     while (!await conn.getAccountInfo(eeWrAddr)) {
       if (!waited) { process.stdout.write("  Polling"); waited = true; }
       process.stdout.write(".");
       await new Promise(r => setTimeout(r, 5000));
+      if (++pollCount % 24 === 0) process.stdout.write(`\n  [${Math.round(pollCount * 5 / 60)}min] still waiting for validator daemon…`);
     }
     if (waited) console.log();
     console.log(`  ↳ EE round ${thisEeId} initialized`);
@@ -380,28 +356,43 @@ async function runRound() {
     }
 
     // Check EE status before finalizing
+    // 0=CommitPhase, 1=RevealPhase, 2=Finalized, 3=Cancelled
     const eeAcct1 = await conn.getAccountInfo(eeRoundPubkey1);
     const eeStatus1 = eeAcct1.data[140];
-    if (eeStatus1 !== 2) {
+    if (eeStatus1 === 2) {
+      console.log(`  [1a] EE round ${thisEeId} already finalized`);
+    } else if (eeStatus1 === 3) {
+      console.log(`  [1a] EE round ${thisEeId} was cancelled — skipping finalize, attempting aggregate`);
+    } else {
       console.log(`  [1a] finalize_via_ee (EE ${thisEeId})`);
       for (let attempt = 0; attempt < 60; attempt++) {
         try {
           await send(ixFinalizeViaEe(thisEeId, eeRoundPubkey1), [payer], "finalize_via_ee");
           break;
         } catch (e) {
-          if (e.message?.includes("0x177d") || e.message?.includes("BindingSlot")) {
+          const eText = e.message + JSON.stringify(e.logs ?? []);
+          if (eText.includes("0x177d") || eText.includes("BindingSlot")) {
             cur1 = await conn.getSlot("confirmed");
             process.stdout.write(`\r  slot ${cur1}: still too early, retrying in 10s…`);
             await new Promise(r => setTimeout(r, 10000));
+          } else if (eText.includes("0x1771") || eText.includes("WrongPhase")) {
+            // Round was cancelled between our status check and the tx landing.
+            console.log(`\n  EE round ${thisEeId} transitioned to cancelled — skipping finalize`);
+            break;
           } else { throw e; }
         }
       }
-    } else {
-      console.log(`  [1a] EE round ${thisEeId} already finalized`);
     }
 
     console.log(`  [1b] aggregate_from_ee (round ${currentRound})`);
-    await send(ixAggregateFromEe(currentRound, eeRoundPubkey1), [payer], "aggregate_from_ee");
+    try {
+      await send(ixAggregateFromEe(currentRound, eeRoundPubkey1), [payer], "aggregate_from_ee");
+    } catch (e) {
+      const eText = e.message + JSON.stringify(e.logs ?? []);
+      if (eText.includes("already") || eText.includes("0x0")) {
+        console.log(`  ↳ Already aggregated`);
+      } else { throw e; }
+    }
 
     console.log(`  [1c] distribute_fees (round ${currentRound})`);
     try {
@@ -420,7 +411,6 @@ async function runRound() {
   // Fast-path requests are fulfilled immediately from pool entropy and don't need a
   // new EE round. Only advance when the pool is stale OR requests are queued.
   {
-    const bs58 = require("bs58");
     const REQUEST_DISC = Buffer.from([106, 141, 109, 114, 88, 187, 109, 5]);
     const [idlePoolAddr] = poolPda();
     const idlePoolData = (await conn.getAccountInfo(idlePoolAddr)).data;
@@ -464,11 +454,12 @@ async function runRound() {
   console.log(`\n[3] Waiting for validator daemon to init EE round ${nextEeId}…`);
   const [nextEeWrAddr] = wrapperPda(nextEeId);
   {
-    let waited2 = false;
+    let waited2 = false; let pollCount2 = 0;
     while (!await conn.getAccountInfo(nextEeWrAddr)) {
       if (!waited2) { process.stdout.write("  Polling"); waited2 = true; }
       process.stdout.write(".");
       await new Promise(r => setTimeout(r, 5000));
+      if (++pollCount2 % 24 === 0) process.stdout.write(`\n  [${Math.round(pollCount2 * 5 / 60)}min] still waiting for validator daemon…`);
     }
     if (waited2) console.log();
     console.log(`  ↳ EE round ${nextEeId} initialized`);
@@ -505,22 +496,41 @@ async function runRound() {
 
   // ── Step 6: Finalize next EE round ────────────────────────────────────────
   console.log(`\n[6] finalize_via_ee (EE round ${nextEeId})`);
-  for (let attempt = 0; attempt < 60; attempt++) {
-    try {
-      await send(ixFinalizeViaEe(nextEeId, eeRoundPubkey), [payer], "finalize_via_ee");
-      break;
-    } catch (e) {
-      if (e.message?.includes("0x177d") || e.message?.includes("BindingSlot")) {
-        const s = await conn.getSlot("confirmed");
-        process.stdout.write(`\r  slot ${s}: still too early, retrying in 10s…`);
-        await new Promise(r => setTimeout(r, 10000));
-      } else { throw e; }
+  const eeAcctNext = await conn.getAccountInfo(eeRoundPubkey);
+  const eeStatusNext = eeAcctNext?.data[140];
+  if (eeStatusNext === 2) {
+    console.log(`  ↳ EE round ${nextEeId} already finalized`);
+  } else if (eeStatusNext === 3) {
+    console.log(`  ↳ EE round ${nextEeId} was cancelled — skipping finalize`);
+  } else {
+    for (let attempt = 0; attempt < 60; attempt++) {
+      try {
+        await send(ixFinalizeViaEe(nextEeId, eeRoundPubkey), [payer], "finalize_via_ee");
+        break;
+      } catch (e) {
+        const eText = e.message + JSON.stringify(e.logs ?? []);
+        if (eText.includes("0x177d") || eText.includes("BindingSlot")) {
+          const s = await conn.getSlot("confirmed");
+          process.stdout.write(`\r  slot ${s}: still too early, retrying in 10s…`);
+          await new Promise(r => setTimeout(r, 10000));
+        } else if (eText.includes("0x1771") || eText.includes("WrongPhase")) {
+          console.log(`\n  EE round ${nextEeId} transitioned to cancelled — skipping finalize`);
+          break;
+        } else { throw e; }
+      }
     }
   }
 
   // ── Step 7: Aggregate into protocol round nextRound ───────────────────────
   console.log(`\n[7] aggregate_from_ee (protocol round ${nextRound})`);
-  await send(ixAggregateFromEe(nextRound, eeRoundPubkey), [payer], "aggregate_from_ee");
+  try {
+    await send(ixAggregateFromEe(nextRound, eeRoundPubkey), [payer], "aggregate_from_ee");
+  } catch (e) {
+    const eText = e.message + JSON.stringify(e.logs ?? []);
+    if (eText.includes("already") || eText.includes("0x0")) {
+      console.log(`  ↳ Already aggregated`);
+    } else { throw e; }
+  }
 
   // ── Step 8: Distribute fees ────────────────────────────────────────────────
   console.log(`\n[8] distribute_fees (round ${nextRound})`);
