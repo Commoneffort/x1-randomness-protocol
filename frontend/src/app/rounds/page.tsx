@@ -19,6 +19,13 @@ function StatusBadge({ aggregated }: { aggregated: boolean }) {
 function EscrowBadge({ escrow }: { escrow: FeeEscrow | null }) {
   if (!escrow) return <span className="text-xs text-text-muted">—</span>;
   if (escrow.feeDistributed) {
+    if (!escrow.originalFees && !escrow.pendingFees) {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-surface-elevated text-text-muted border border-border">
+          Empty Round
+        </span>
+      );
+    }
     return (
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200">
         Distributed
@@ -84,6 +91,29 @@ export default function RoundsPage() {
         </p>
       </div>
 
+      {/* Fee summary */}
+      {(() => {
+        const escrowList = Object.values(escrows).filter(Boolean) as FeeEscrow[];
+        const totalCollected = escrowList.reduce((s, e) => s + (e.originalFees || e.pendingFees), 0);
+        const totalDistributed = escrowList.filter(e => e.feeDistributed).reduce((s, e) => s + (e.originalFees || e.pendingFees), 0);
+        const roundsWithFees = escrowList.filter(e => (e.originalFees || e.pendingFees) > 0).length;
+        return (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            {[
+              { label: "Collected (last 15 rounds)", value: `${client.formatXnt(totalCollected)} XNT` },
+              { label: "Distributed", value: `${client.formatXnt(totalDistributed)} XNT` },
+              { label: "Validator earnings (95%)", value: `${client.formatXnt(Math.floor(totalDistributed * 0.95))} XNT` },
+              { label: "Rounds with fees", value: `${roundsWithFees} / ${escrowList.length}` },
+            ].map(({ label, value }) => (
+              <div key={label} className="card py-3 px-4">
+                <p className="text-xs text-text-muted">{label}</p>
+                <p className="text-base font-semibold text-text-primary mt-0.5">{value}</p>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
+
       {/* Legend */}
       <div className="card">
         <h2 className="text-sm font-semibold text-text-primary mb-3">Round Lifecycle</h2>
@@ -140,9 +170,11 @@ export default function RoundsPage() {
                     </div>
                     <div className="flex items-center gap-4 text-right shrink-0">
                       <div className="hidden sm:block">
-                        <p className="text-xs text-text-muted">Fees</p>
+                        <p className="text-xs text-text-muted">Fees collected</p>
                         <p className="text-sm font-medium text-text-primary">
-                          {escrow ? client.formatXnt(escrow.pendingFees) : "—"} XNT
+                          {escrow && (escrow.originalFees || escrow.pendingFees)
+                            ? `${client.formatXnt(escrow.originalFees || escrow.pendingFees)} XNT`
+                            : "—"}
                         </p>
                       </div>
                       <svg className={`h-4 w-4 text-text-muted transition-transform ${isExpanded ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
