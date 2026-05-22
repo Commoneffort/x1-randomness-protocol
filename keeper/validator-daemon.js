@@ -330,13 +330,19 @@ async function runOnce() {
     console.log("  Not registered. Run: VALIDATOR_KEYPAIR=<path> node validator-daemon.js --register");
     return;
   }
-  const isActive = regAcct.data[137] !== 0;
-  if (!isActive) {
-    console.log("  Validator marked inactive — refresh status and reactivate");
-    return;
-  }
   const voteAccount  = new PublicKey(regAcct.data.slice(40, 72));
   const stakeAccount = new PublicKey(regAcct.data.slice(72, 104));
+  const isActive = regAcct.data[137] !== 0;
+  if (!isActive) {
+    console.log("  Validator marked inactive — calling refresh_validator_status to reactivate");
+    try {
+      await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status");
+      console.log("  ✓ Reactivated — will participate from next round");
+    } catch (e) {
+      console.log("  ✗ Refresh failed:", e.message, "— check stake/vote account status");
+    }
+    return;
+  }
 
   // Check eligibility for this round
   if (!isEligible(poolEntropy, eeV4RoundId, identity.publicKey)) {
