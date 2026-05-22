@@ -714,7 +714,8 @@ async function sweepUnclaimedRewards() {
     } catch (e) {
       const msg = e.message ?? "";
       const silent = msg.includes("RewardAlreadyClaimed") || msg.includes("already")
-                  || msg.includes("FeeEscrowInsufficient") || msg.includes("0x177f");
+                  || msg.includes("FeeEscrowInsufficient") || msg.includes("0x177f")
+                  || msg.includes("InvalidEeV4RoundResult") || msg.includes("0x1784");
       if (!silent) console.warn(`  Sweep claim failed for round ${protocolRound}: ${e.message}`);
     }
   }
