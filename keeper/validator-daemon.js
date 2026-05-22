@@ -500,8 +500,8 @@ async function runOnce() {
             console.log("  WrongPhase — commit confirmed, round moved to RevealPhase");
             saveSecrets(eeV4RoundId, secrets.secret, secrets.nonce, true);
           } else {
-            console.log("  WrongPhase — another pair filled EE round — not a contributor, clearing secrets");
-            clearSecrets();
+            console.log("  WrongPhase — another pair filled EE round — not a contributor, skipping this EE round");
+            saveSecrets(eeV4RoundId, secrets.secret, secrets.nonce, true);
             return;
           }
         } else {
