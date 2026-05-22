@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // Cancels a stuck EE V4 round that never reached RevealPhase.
 // Must be run by the round's coordinator (the validator who called init_ee_round).
-// Usage: VALIDATOR_KEYPAIR=~/.config/solana/identity.json node /tmp/cancel-ee-round.js
+// Usage: EE_ROUND_ID=<id> VALIDATOR_KEYPAIR=~/.config/solana/identity.json node cancel-ee-round.js
 
 const { Connection, Keypair, PublicKey, Transaction, TransactionInstruction, sendAndConfirmTransaction } = require("@solana/web3.js");
 const fs   = require("fs");
+const os   = require("os");
 const path = require("path");
 
 // ── patch rpc-websockets if needed ──────────────────────────────────────────
@@ -21,13 +22,20 @@ const path = require("path");
 const EE_V4 = new PublicKey("FDyWtM9UBNfXNuc5oZJ1V86d3dz635WnqMfX8x5Uifbm");
 const CANCEL_DISC = Buffer.from([82, 70, 134, 54, 46, 96, 148, 8]);
 
-const RPC = "https://rpc.mainnet.x1.xyz";
+const RPC = process.env.RPC_URL || "https://rpc.mainnet.x1.xyz";
 
 const keypairPath = process.env.VALIDATOR_KEYPAIR;
 if (!keypairPath) { console.error("VALIDATOR_KEYPAIR env var required"); process.exit(1); }
 const identity = Keypair.fromSecretKey(
-  Uint8Array.from(JSON.parse(fs.readFileSync(keypairPath.replace("~", process.env.HOME), "utf8")))
+  Uint8Array.from(JSON.parse(fs.readFileSync(keypairPath.replace(/^~/, os.homedir()), "utf8")))
 );
+
+if (!process.env.EE_ROUND_ID) {
+  console.error("EE_ROUND_ID env var required");
+  console.error("Example: EE_ROUND_ID=395040 VALIDATOR_KEYPAIR=~/.config/solana/identity.json node cancel-ee-round.js");
+  process.exit(1);
+}
+const TARGET_EE_ID = BigInt(process.env.EE_ROUND_ID);
 
 const conn = new Connection(RPC, "confirmed");
 
@@ -36,8 +44,6 @@ function u64le(n) { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(n)); re
 async function main() {
   const bs58 = require("bs58");
 
-  // Find EE round 394871 (the stuck round)
-  const TARGET_EE_ID = 394871n;
   console.log(`Looking for EE round ${TARGET_EE_ID}…`);
 
   const accts = await conn.getProgramAccounts(EE_V4, {
@@ -99,8 +105,8 @@ async function main() {
   const tx = new Transaction().add(ix);
   console.log("\nSending cancel_round…");
   const sig = await sendAndConfirmTransaction(conn, tx, [identity], { commitment: "confirmed" });
-  console.log("✓ cancel_round:", sig);
-  console.log("EE round 394862 cancelled — validator daemons will now open EE round 394863.");
+  console.log(`✓ cancel_round: ${sig}`);
+  console.log(`EE round ${TARGET_EE_ID} cancelled — validator daemons will now open EE round ${TARGET_EE_ID + 1n}.`);
 }
 
 main().catch(e => { console.error("❌", e.message); process.exit(1); });

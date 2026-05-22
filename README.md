@@ -381,13 +381,11 @@ All fees — both `request_randomness` and `game_seed` — accumulate in the rou
 
 ## Build
 
-Requires Solana platform-tools v1.52.
-
 ```bash
-anchor build -- --tools-version v1.52
+anchor build
 ```
 
-IDL generation emits a version mismatch warning (anchor-lang 0.30.1 vs anchor-cli 0.31.0). The `.so` compiles correctly regardless.
+IDL generation fails with an `anchor-syn` compile error (proc-macro API). This is expected and harmless — the `.so` compiles correctly in the same invocation.
 
 **If Cargo.lock is regenerated**, re-pin these crates immediately:
 
@@ -439,6 +437,16 @@ node run-round.js --loop
 ```
 
 Requirements: ≥1,000 XNT delegated stake, active vote account voting within 500 slots.
+
+To reduce `init_ee_round` races when running multiple validators, stagger their poll intervals:
+
+```bash
+# Validator A
+POLL_MS=13000 VALIDATOR_KEYPAIR=... node validator-daemon.js --loop
+
+# Validator B
+POLL_MS=17000 VALIDATOR_KEYPAIR=... node validator-daemon.js --loop
+```
 
 ## Cancelling a Stuck EE Round (Validator Guide)
 
@@ -492,17 +500,11 @@ If the `Coordinator` line matches your validator identity pubkey, you are the on
 
 ### Step 2 — Run the cancel script
 
-Open `keeper/cancel-ee-round.js` in a text editor and change the `TARGET_EE_ID` near the top to the stuck round number:
-
-```js
-const TARGET_EE_ID = 394782n;  // ← change this number
-```
-
-Save the file, then run:
+Pass the stuck round number as `EE_ROUND_ID`:
 
 ```bash
 cd ~/x1-randomness-protocol/keeper
-VALIDATOR_KEYPAIR=~/.config/solana/identity.json node cancel-ee-round.js
+EE_ROUND_ID=394782 VALIDATOR_KEYPAIR=~/.config/solana/identity.json node cancel-ee-round.js
 ```
 
 The script will:

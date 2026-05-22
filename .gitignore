@@ -11,3 +11,10 @@ Cargo.lock
 *.local
 /tmp/
 .DS_Store
+# build artifacts
+frontend/tsconfig.tsbuildinfo
+# one-off operational scripts (round-specific, not for general use)
+keeper/cancel-ee-round-*.js
+!keeper/cancel-ee-round.js
+# per-round secrets (stored outside repo at ~/.config/x1randomness/)
+vd-secrets-*.json

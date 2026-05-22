@@ -114,6 +114,13 @@ VALIDATOR_KEYPAIR=~/.config/solana/identity.json nohup node validator-daemon.js 
 VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --register
 ```
 
+**Validator daemon env vars:**
+- `VALIDATOR_KEYPAIR` — required; path to identity keypair
+- `POLL_MS` — optional; poll interval in milliseconds (default 15000). Stagger multiple validators to reduce `init_ee_round` races: `POLL_MS=13000` on one, `POLL_MS=17000` on another.
+- `RPC_URL` — optional; RPC endpoint (default `https://rpc.mainnet.x1.xyz`)
+
+**Per-round secrets file:** `~/.config/x1randomness/vd-secrets-<pubkeyPrefix>.json` — stores only the 32-byte commit entropy and nonce for the current EE round. Created with mode `0o600`; directory with `0o700`. Does NOT contain the validator signing key.
+
 **Idle gate (V4.3):** Both the crank and validator daemon check before opening any new EE round: if the entropy pool is warm (< 21 600 slots stale) AND there are no unfulfilled `RequestState` accounts on-chain, they idle and re-poll without sending any transactions. A round starts automatically when a queued request appears or the pool goes stale. Running both processes costs nothing when the protocol is idle. The 21 600-slot threshold matches `STALENESS_HARD_LIMIT_SLOTS` and reduces crank cost from ~43 → ~3 XNT/month.
 
 **init_ee_round responsibility**: The validator daemon calls `init_ee_round` (NOT the crank). The daemon gates this call on the current EE round being Finalized (status=2) or Cancelled (status=3) — it will NOT advance to the next EE round while the current one is still in progress. The crank polls for the EE WrapperRound PDA in step 3 and waits for a validator daemon to create it.
@@ -298,7 +305,7 @@ Full field layout (Borsh/Anchor, no padding):
 - Required when: status=CommitPhase (0) and round is stuck (reveal window passed, not enough commits)
 - Signer: round coordinator (validator who called init_ee_round)  
 - remaining_accounts: committed contributor wallets in order (for stake refund)
-- Script: `/tmp/cancel-ee-round.js`
+- Script: `keeper/cancel-ee-round.js` — usage: `EE_ROUND_ID=<id> VALIDATOR_KEYPAIR=~/.config/solana/identity.json node cancel-ee-round.js`
 
 ## Fee economics
 

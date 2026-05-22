@@ -15,8 +15,10 @@
  *   VALIDATOR_KEYPAIR=/path/to/identity.json node validator-daemon.js [--loop]
  *
  * The identity keypair is the same key registered via register_validator.
- * Secrets are persisted to /tmp/vd-secrets-<pubkeyPrefix>.json before each
- * commit so they survive process restarts.
+ * Per-round commit entropy (secret + nonce) is persisted to
+ * ~/.config/x1randomness/vd-secrets-<pubkeyPrefix>.json before each commit
+ * so they survive process restarts. This file does NOT contain the validator
+ * signing key — that stays in the keypair file pointed to by VALIDATOR_KEYPAIR.
  */
 
 // rpc-websockets dropped CommonClient and WebSocket from its main exports;
@@ -47,6 +49,8 @@ const {
 const crypto = require("crypto");
 const fs     = require("fs");
 const bs58   = require("bs58");
+const os     = require("os");
+const path   = require("path");
 
 const STAKE_PROG = new PublicKey("Stake11111111111111111111111111111111111111");
 
@@ -64,12 +68,13 @@ if (!keypairPath) {
   process.exit(1);
 }
 const identity = Keypair.fromSecretKey(
-  new Uint8Array(JSON.parse(fs.readFileSync(keypairPath.replace(/^~/, process.env.HOME))))
+  new Uint8Array(JSON.parse(fs.readFileSync(keypairPath.replace(/^~/, os.homedir()))))
 );
 
 const doLoop       = process.argv.includes("--loop");
 const doRegister   = process.argv.includes("--register");
-const STATE_FILE   = `/tmp/vd-secrets-${identity.publicKey.toBase58().slice(0, 8)}.json`;
+const STATE_FILE   = path.join(os.homedir(), ".config", "x1randomness", `vd-secrets-${identity.publicKey.toBase58().slice(0, 8)}.json`);
+const eeRoundCache = new Map(); // eeRoundId (number) → PublicKey; avoids repeated getProgramAccounts scans
 
 console.log(`Validator   : ${identity.publicKey.toBase58()}`);
 console.log(`RPC         : ${RPC}`);
@@ -149,18 +154,20 @@ function eeRoundPda(coordinator, roundId) {
 
 // ── Secret persistence ─────────────────────────────────────────────────────────
 
-function saveSecrets(eeRoundId, secret, nonce) {
+function saveSecrets(eeRoundId, secret, nonce, committed = false) {
+  fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true, mode: 0o700 });
   fs.writeFileSync(STATE_FILE, JSON.stringify({
     eeRoundId,
     secret: secret.toString("hex"),
     nonce:  nonce.toString("hex"),
+    committed,
   }), { mode: 0o600 });
 }
 function loadSecrets(eeRoundId) {
   try {
     const d = JSON.parse(fs.readFileSync(STATE_FILE));
     if (d.eeRoundId === eeRoundId) {
-      return { secret: Buffer.from(d.secret, "hex"), nonce: Buffer.from(d.nonce, "hex") };
+      return { secret: Buffer.from(d.secret, "hex"), nonce: Buffer.from(d.nonce, "hex"), committed: !!d.committed };
     }
   } catch (_) {}
   return null;
@@ -354,6 +361,7 @@ async function runOnce() {
     const { ix: initIx, eeRoundPubkey: newEeRoundPubkey } = ixInitEeRound(identity.publicKey, voteAccount, stakeAccount, eeV4RoundId);
     try {
       await send(initIx, `init_ee_round(id=${eeV4RoundId})`);
+      eeRoundCache.set(eeV4RoundId, newEeRoundPubkey);
     } catch (initErr) {
       // Another validator may have raced and won — check if the wrapper exists now.
       if (await conn.getAccountInfo(eeWrAddr)) {
@@ -372,6 +380,7 @@ async function runOnce() {
       .digest();
     try {
       await send(ixCommit(eeV4RoundId, newEeRoundPubkey, voteAccount, stakeAccount, firstCommitment), "commit_via_ee");
+      saveSecrets(eeV4RoundId, firstSecrets.secret, firstSecrets.nonce, true);
       console.log(`  ✓ Committed to EE round ${eeV4RoundId} immediately after init`);
     } catch (commitErr) {
       console.log(`  ⚠ Immediate commit failed: ${commitErr.message} — will retry next poll`);
@@ -379,22 +388,25 @@ async function runOnce() {
     return;
   }
 
-  let eeRoundPubkey = null;
-  try {
-    // round_id (u64 LE) is at offset 40 in the EE round account (after 8-byte disc + 32-byte coordinator)
-    const roundIdBytes = u64le(eeV4RoundId);
-    const roundIdBase58 = bs58.encode(roundIdBytes);
-    const eeAccounts = await conn.getProgramAccounts(EE_V4, {
-      filters: [
-        { dataSize: 838 },
-        { memcmp: { offset: 40, bytes: roundIdBase58 } },
-      ],
-    });
-    if (eeAccounts.length > 0) {
-      eeRoundPubkey = eeAccounts[0].pubkey;
+  let eeRoundPubkey = eeRoundCache.get(eeV4RoundId) || null;
+  if (!eeRoundPubkey) {
+    try {
+      // round_id (u64 LE) at offset 40; scan once per new round_id, then cache.
+      const roundIdBytes = u64le(eeV4RoundId);
+      const roundIdBase58 = bs58.encode(roundIdBytes);
+      const eeAccounts = await conn.getProgramAccounts(EE_V4, {
+        filters: [
+          { dataSize: 838 },
+          { memcmp: { offset: 40, bytes: roundIdBase58 } },
+        ],
+      });
+      if (eeAccounts.length > 0) {
+        eeRoundPubkey = eeAccounts[0].pubkey;
+        eeRoundCache.set(eeV4RoundId, eeRoundPubkey);
+      }
+    } catch (e) {
+      console.log(`  EE round scan failed: ${e.message}`);
     }
-  } catch (e) {
-    console.log(`  EE round scan failed: ${e.message}`);
   }
 
   if (!eeRoundPubkey) {
@@ -435,54 +447,60 @@ async function runOnce() {
     let secrets = loadSecrets(eeV4RoundId);
 
     if (!secrets) {
-      secrets = { secret: crypto.randomBytes(32), nonce: crypto.randomBytes(32) };
+      secrets = { secret: crypto.randomBytes(32), nonce: crypto.randomBytes(32), committed: false };
       saveSecrets(eeV4RoundId, secrets.secret, secrets.nonce);
       console.log("  Generated and persisted fresh secrets");
+    } else if (secrets.committed) {
+      console.log("  Already committed this round (persisted state) — waiting for reveal window");
     } else {
       console.log("  Loaded persisted secrets — will re-attempt commit to confirm on-chain");
     }
 
-    // Always attempt commit — the on-chain program is idempotent (returns "already committed"
-    // if we already committed). This prevents the failure mode where a network error drops
-    // the commit tx but leaves secrets on disk, causing the reveal to fail later.
-    const commitment = crypto.createHash("sha256")
-      .update(Buffer.concat([secrets.secret, secrets.nonce, identity.publicKey.toBuffer()]))
-      .digest();
-    try {
-      await send(ixCommit(eeV4RoundId, eeRoundPubkey, voteAccount, stakeAccount, commitment), "commit_via_ee");
-    } catch (e) {
-      if (e.message?.includes("already") || e.message?.includes("0x0")) {
-        console.log("  Already committed this round (on-chain confirmed)");
-      } else if (e.message?.includes("NotSelectedForRound")) {
-        console.log("  Selection check failed on-chain — not eligible this round");
-        clearSecrets();
-        return;
-      } else if (e.message?.includes("0x7d6") || e.message?.includes("ConstraintSeeds")) {
-        console.log("  Config advanced before commit landed — round changed mid-cycle, retrying next poll");
-        clearSecrets();
-        return;
-      } else if ([e.message, ...(e.logs ?? [])].some(s => s?.includes("0x1771") || s?.includes("WrongPhase"))) {
-        // WrongPhase on commit means the round is in RevealPhase. Check if we actually
-        // committed — another validator may have filled both slots before us.
-        const eeDataFresh = (await conn.getAccountInfo(eeRoundPubkey))?.data;
-        const commitCount = eeDataFresh ? eeDataFresh[74] : 0;
-        let isContributor = false;
-        for (let i = 0; i < commitCount; i++) {
-          const base = 158 + i * 68;
-          if (eeDataFresh && new PublicKey(eeDataFresh.slice(base, base + 32)).equals(identity.publicKey)) {
-            isContributor = true;
-            break;
-          }
-        }
-        if (isContributor) {
-          console.log("  WrongPhase — commit confirmed, round moved to RevealPhase");
-        } else {
-          console.log("  WrongPhase — another pair filled EE round — not a contributor, clearing secrets");
+    if (!secrets.committed) {
+      // Attempt commit — idempotent on-chain. Re-attempt prevents the failure mode where a
+      // network error drops the tx but leaves uncommitted secrets on disk.
+      const commitment = crypto.createHash("sha256")
+        .update(Buffer.concat([secrets.secret, secrets.nonce, identity.publicKey.toBuffer()]))
+        .digest();
+      try {
+        await send(ixCommit(eeV4RoundId, eeRoundPubkey, voteAccount, stakeAccount, commitment), "commit_via_ee");
+        saveSecrets(eeV4RoundId, secrets.secret, secrets.nonce, true);
+      } catch (e) {
+        if (e.message?.includes("already") || e.message?.includes("0x0")) {
+          console.log("  Already committed this round (on-chain confirmed)");
+          saveSecrets(eeV4RoundId, secrets.secret, secrets.nonce, true);
+        } else if (e.message?.includes("NotSelectedForRound")) {
+          console.log("  Selection check failed on-chain — not eligible this round");
           clearSecrets();
           return;
+        } else if (e.message?.includes("0x7d6") || e.message?.includes("ConstraintSeeds")) {
+          console.log("  Config advanced before commit landed — round changed mid-cycle, retrying next poll");
+          clearSecrets();
+          return;
+        } else if ([e.message, ...(e.logs ?? [])].some(s => s?.includes("0x1771") || s?.includes("WrongPhase"))) {
+          // WrongPhase on commit means the round is in RevealPhase. Check if we actually
+          // committed — another validator may have filled both slots before us.
+          const eeDataFresh = (await conn.getAccountInfo(eeRoundPubkey))?.data;
+          const commitCount = eeDataFresh ? eeDataFresh[74] : 0;
+          let isContributor = false;
+          for (let i = 0; i < commitCount; i++) {
+            const base = 158 + i * 68;
+            if (eeDataFresh && new PublicKey(eeDataFresh.slice(base, base + 32)).equals(identity.publicKey)) {
+              isContributor = true;
+              break;
+            }
+          }
+          if (isContributor) {
+            console.log("  WrongPhase — commit confirmed, round moved to RevealPhase");
+            saveSecrets(eeV4RoundId, secrets.secret, secrets.nonce, true);
+          } else {
+            console.log("  WrongPhase — another pair filled EE round — not a contributor, clearing secrets");
+            clearSecrets();
+            return;
+          }
+        } else {
+          throw e;
         }
-      } else {
-        throw e;
       }
     }
   }
@@ -544,6 +562,7 @@ async function runOnce() {
           const { ix: initIx, eeRoundPubkey: newEeRoundPubkey } = ixInitEeRound(identity.publicKey, voteAccount, stakeAccount, nextEeId);
           try {
             await send(initIx, `init_ee_round(id=${nextEeId})`);
+            eeRoundCache.set(nextEeId, newEeRoundPubkey);
           } catch (initErr) {
             if (await conn.getAccountInfo(nextEeWrAddr)) {
               console.log(`  init_ee_round raced — another validator won, they will commit`);
@@ -561,6 +580,7 @@ async function runOnce() {
             .digest();
           try {
             await send(ixCommit(nextEeId, newEeRoundPubkey, voteAccount, stakeAccount, freshCommitment), "commit_via_ee");
+            saveSecrets(nextEeId, freshSecrets.secret, freshSecrets.nonce, true);
             console.log(`  ✓ Committed to EE round ${nextEeId} immediately after init`);
           } catch (commitErr) {
             console.log(`  ⚠ Immediate commit failed: ${commitErr.message} — will retry next poll`);
@@ -743,7 +763,7 @@ async function main() {
     return;
   }
   if (doLoop) {
-    const POLL_MS = 15_000; // check every 15s
+    const POLL_MS = parseInt(process.env.POLL_MS, 10) || 15_000;
     while (true) {
       try {
         await runOnce();
