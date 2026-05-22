@@ -694,9 +694,10 @@ async function sweepUnclaimedRewards() {
       await send(claimIx, `claim_validator_reward(round=${protocolRound})`);
       claimed++;
     } catch (e) {
-      if (!e.message?.includes("RewardAlreadyClaimed") && !e.message?.includes("already")) {
-        console.warn(`  Sweep claim failed for round ${protocolRound}: ${e.message}`);
-      }
+      const msg = e.message ?? "";
+      const silent = msg.includes("RewardAlreadyClaimed") || msg.includes("already")
+                  || msg.includes("FeeEscrowInsufficient") || msg.includes("0x177f");
+      if (!silent) console.warn(`  Sweep claim failed for round ${protocolRound}: ${e.message}`);
     }
   }
   if (claimed === 0 && myReveals.length > 0) {
