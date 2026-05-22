@@ -154,20 +154,25 @@ function eeRoundPda(coordinator, roundId) {
 
 // ── Secret persistence ─────────────────────────────────────────────────────────
 
-function saveSecrets(eeRoundId, secret, nonce, committed = false) {
+function saveSecrets(eeRoundId, secret, nonce, committed = false, skipped = false) {
   fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true, mode: 0o700 });
   fs.writeFileSync(STATE_FILE, JSON.stringify({
     eeRoundId,
     secret: secret.toString("hex"),
     nonce:  nonce.toString("hex"),
     committed,
+    skipped,
   }), { mode: 0o600 });
+}
+function saveSkipped(eeRoundId) {
+  const dummy = Buffer.alloc(32);
+  saveSecrets(eeRoundId, dummy, dummy, true, true);
 }
 function loadSecrets(eeRoundId) {
   try {
     const d = JSON.parse(fs.readFileSync(STATE_FILE));
     if (d.eeRoundId === eeRoundId) {
-      return { secret: Buffer.from(d.secret, "hex"), nonce: Buffer.from(d.nonce, "hex"), committed: !!d.committed };
+      return { secret: Buffer.from(d.secret, "hex"), nonce: Buffer.from(d.nonce, "hex"), committed: !!d.committed, skipped: !!d.skipped };
     }
   } catch (_) {}
   return null;
@@ -451,6 +456,10 @@ async function runOnce() {
     }
 
     let secrets = loadSecrets(eeV4RoundId);
+    if (secrets?.skipped) {
+      console.log("  Already skipped this EE round (not a contributor) — waiting for next round");
+      return;
+    }
 
     if (!secrets) {
       secrets = { secret: crypto.randomBytes(32), nonce: crypto.randomBytes(32), committed: false };
@@ -501,7 +510,7 @@ async function runOnce() {
             saveSecrets(eeV4RoundId, secrets.secret, secrets.nonce, true);
           } else {
             console.log("  WrongPhase — another pair filled EE round — not a contributor, skipping this EE round");
-            saveSecrets(eeV4RoundId, secrets.secret, secrets.nonce, true);
+            saveSkipped(eeV4RoundId);
             return;
           }
         } else {
@@ -610,6 +619,10 @@ async function runOnce() {
     const secrets = loadSecrets(eeV4RoundId);
     if (!secrets) {
       console.log("  In reveal window but no secrets found — missed commit phase");
+      return;
+    }
+    if (secrets.skipped) {
+      console.log("  Skipped this EE round (not a contributor) — waiting for next round");
       return;
     }
     try {
