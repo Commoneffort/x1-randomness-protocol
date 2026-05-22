@@ -636,6 +636,11 @@ async function runOnce() {
         // Round transitioned out of RevealPhase between our check and the tx landing.
         console.log("  WrongPhase on reveal — round no longer in RevealPhase, clearing secrets");
         clearSecrets();
+      } else if ([e.message, ...(e.logs ?? [])].some(s => s?.includes("0x1777") || s?.includes("ContributorNotFound"))) {
+        // Secrets file had committed=true but skipped was not set (written by older code).
+        // We are not a contributor for this EE round — mark skipped so we stop trying.
+        console.log("  ContributorNotFound on reveal — not a contributor for this EE round, marking skipped");
+        saveSkipped(eeV4RoundId);
       } else { throw e; }
     }
   }
