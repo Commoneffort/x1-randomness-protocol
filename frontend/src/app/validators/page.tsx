@@ -4,7 +4,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { useX1Wallet, useConnection } from "@/lib/X1WalletContext";
 import { PublicKey, Transaction, TransactionInstruction, SystemProgram } from "@solana/web3.js";
 import { ProtocolClient, ValidatorReveal, FeeEscrow, ValidatorRegistration } from "@/lib/protocol";
-import { PROGRAM_ID, EE_V4_STAKE_LAMPORTS, FEE_VALIDATORS_PCT, DISC, ACCT_DISC, MIN_VALIDATOR_STAKE_XNT, VALIDATOR_MAX_INACTIVE_SLOTS, MIN_COMMITTEE_SIZE } from "@/lib/constants";
+import { PROGRAM_ID, EE_V4_STAKE_LAMPORTS, FEE_VALIDATORS_PCT, DISC, ACCT_DISC, MIN_VALIDATOR_STAKE_XNT, VALIDATOR_MAX_INACTIVE_SLOTS, MIN_COMMITTEE_SIZE, VALIDATOR_MAX_CONSECUTIVE_MISSES } from "@/lib/constants";
 import { findFeeEscrowPda, findValRegPda } from "@/lib/pdas";
 
 export default function ValidatorsPage() {
@@ -186,7 +186,7 @@ export default function ValidatorsPage() {
 
   // isStale is a display hint only — VALIDATOR_MAX_INACTIVE_SLOTS is a commit-eligibility
   // constraint, not a heartbeat. With the idle gate, validators go hundreds of slots between
-  // rounds. A validator is truly offline only when active === false (consecutive_misses >= 3).
+  // rounds. A validator is truly offline only when active === false (consecutive_misses >= 5).
   const isStale = (v: ValidatorRegistration) =>
     currentSlot - v.lastActiveSlot > VALIDATOR_MAX_INACTIVE_SLOTS && !v.active;
 
@@ -363,7 +363,7 @@ export default function ValidatorsPage() {
           {[
             { k: "Min stake", v: `${MIN_VALIDATOR_STAKE_XNT.toLocaleString()} XNT delegated to your vote account` },
             { k: "Max vote staleness", v: `${VALIDATOR_MAX_INACTIVE_SLOTS} slots (~3 min) — checked at every commit` },
-            { k: "Consecutive miss limit", v: "3 misses → validator marked inactive, excluded from rounds" },
+            { k: "Consecutive miss limit", v: `${VALIDATOR_MAX_CONSECUTIVE_MISSES} misses → validator marked inactive, excluded from rounds` },
             { k: "Kick mechanism", v: "Any wallet calls mark_validator_missed; slashes are automatic on finalize" },
             { k: "Recover from inactive", v: "Call refresh_validator_status after going back online" },
             { k: "Committee size", v: `Minimum ${MIN_COMMITTEE_SIZE} validators per round — single-validator entropy is impossible` },
@@ -390,14 +390,25 @@ npm install
 # Register your validator (one-time, requires ≥1000 XNT staked)
 VALIDATOR_KEYPAIR=/path/to/your-identity-key.json node validator-daemon.js --register
 
-# Run the validator daemon (holds only your identity key)
+# Run the validator daemon (identity key signs init_ee_round; used for all ops until hot key is set)
 VALIDATOR_KEYPAIR=/path/to/your-identity-key.json node validator-daemon.js --loop
 
-# Optionally run the permissionless crank (advances rounds, finalizes, distributes)
-# Any wallet can run this — it has zero protocol authority
-node run-round.js --loop`}</pre>
+# V4.6: Run with a hot key — identity key stays cold; hot key signs commit/reveal/claim
+VALIDATOR_KEYPAIR=/path/to/your-identity-key.json \\
+  X1_RANDOMNESS_KEYPAIR=/path/to/your-hot-key.json \\
+  node validator-daemon.js --loop
+
+# V4.6: Rotate to a hot key (requires identity key signature; run once)
+VALIDATOR_KEYPAIR=/path/to/your-identity-key.json \\
+  node validator-daemon.js --rotate-authority <hot_key_pubkey>
+
+# Deregister (uses identity key)
+VALIDATOR_KEYPAIR=/path/to/your-identity-key.json node validator-daemon.js --deregister
+
+# Permissionless crank (advances rounds, finalizes, distributes — any wallet, zero authority)
+CRANK_KEYPAIR=/path/to/any-key.json node run-round.js --loop`}</pre>
         <p className="text-xs text-text-muted mt-3">
-          The crank (<code className="font-mono">run-round.js</code>) and validator daemon (<code className="font-mono">validator-daemon.js</code>) are separate processes. The crank is a public good anyone can run. Your daemon is personal — it commits and claims rewards using your validator key only.
+          The crank (<code className="font-mono">run-round.js</code>) and validator daemon (<code className="font-mono">validator-daemon.js</code>) are separate processes. The crank is a public good anyone can run. Your daemon is personal — it commits and claims rewards using your validator key only. V4.6 adds hot key support: keep your identity key offline and use a separate hot key for daily commit/reveal operations.
         </p>
       </div>
 

@@ -47,7 +47,7 @@ On-demand verifiable randomness on X1 Mainnet. A fully permissionless, decentral
 ┌──────────────────────────────────────────────────────────┐
 │  Entropy Engine V4 (FDyWt...)                             │
 │  Immutable · RANDAO + VDF · Perpetual round cycle        │
-│  n=2 contributors per round (grows with validator set)   │
+│  n=7, m=5 per round (V4.6; grows probabilistically)      │
 │  Commit stake 0.01 XNT (returned on valid reveal)        │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -86,7 +86,7 @@ Lowering `COMMIT_SELECTION_THRESHOLD` as the validator set grows caps expected c
 | Process | Keys held | Purpose |
 |---------|-----------|---------|
 | `run-round.js` (crank) | Crank key only | Calls permissionless on-chain cranks. Zero protocol authority. |
-| `validator-daemon.js` | Own identity key only | Each validator runs independently. Monitors chain, commits, reveals, claims rewards. |
+| `validator-daemon.js` | Identity key (cold) + optional hot key (`X1_RANDOMNESS_KEYPAIR`) | Each validator runs independently. Monitors chain, commits, reveals, claims rewards. V4.6: hot key signs commit/reveal/claim; identity signs init/register/rotate. |
 
 The crank has no special power — any node can replace it. Stopping the crank delays round advancement but cannot corrupt randomness.
 
@@ -112,7 +112,7 @@ create_fee_escrow(round)
 
 ```
 init_ee_round(ee_round_id)
-  → n=MIN_EE_M_THRESHOLD(2), m=MIN_EE_M_THRESHOLD(2),
+  → n=EE_V4_N_CONTRIBUTORS(7), m=EE_V4_M_THRESHOLD(5),
     binding_slot=current_slot+EE_V4_MIN_BINDING_SLOTS(675) — all derived on-chain
   → CPIs initialize_round into EE V4
   → creates WrapperRound PDA [b"wrapper-round", ee_round_id]
@@ -209,7 +209,7 @@ request_randomness(seed, callback_program, callback_instruction)
 | `distribute_fees` | Pay 5% to crank; record original_fees; enable validator 95% claims | Anyone (permissionless, earns 5%) |
 | `claim_validator_reward` | Per-validator fee claim — original_fees × 95% ÷ reveal_count | Validator |
 | `set_fee(new_fee)` | Update protocol-wide request fee | Authority |
-| `update_dapp_fee(fee_override)` | Set per-dApp fee override, 0 = protocol default | Protocol authority |
+| `update_dapp_fee(fee_override)` | Set per-dApp fee override, 0 = protocol default | dApp authority |
 | `refund_request` | Refund fee if EE V4 round was cancelled (status byte 140 == 3) | Requester |
 | `deliver_callback` | Push entropy via CPI to registered dApp callback | Crank (must sign) |
 | `verify_entropy(request_id)` | Create on-chain EntropyReceipt from fulfilled RequestState | Anyone |
@@ -233,12 +233,12 @@ request_randomness(seed, callback_program, callback_instruction)
 | Account | Seeds | Size | Description |
 |---------|-------|------|-------------|
 | `ProtocolConfig` | `["protocol-config"]` | 113 B | Global config, authority, current round, EE V4 round tracking |
-| `EntropyPool` | `["entropy-pool"]` | 67 B | Hot entropy cache — fast path served from here |
+| `EntropyPool` | `["entropy-pool"]` | 75 B (67 B pre-V4.3 migration) | Hot entropy cache — fast path served from here |
 | `WrapperRound` (protocol) | `["wrapper-round", round]` | 87 B | Created by `advance_round`. Tracks pending requests and fees. |
 | `WrapperRound` (EE) | `["wrapper-round", ee_round_id]` | 87 B | Created by `init_ee_round`. Tracks EE V4 mapping and aggregation status. |
 | `FeeEscrow` | `["fee-escrow", round]` | 42 B | Fee accumulation per protocol round |
 | `DappRegistration` | `["dapp", dapp_id]` | 145 B | Per-dApp callback, frequency config, fee override |
-| `ValidatorRegistration` | `["val-reg", identity]` | 139 B | Validator identity, vote/stake accounts, liveness tracking |
+| `ValidatorRegistration` | `["val-reg", identity]` | 171 B (139 B pre-V4.6 migration) | Validator identity, vote/stake accounts, hot key, liveness tracking |
 | `ValidatorReveal` | `["validator-reveal", ee_round, contributor]` | 82 B | Created at reveal time; used to claim per-validator reward |
 | `RequestState` | `["request", requester, seed]` | 202 B | Individual randomness request (queue path) |
 | `EntropyReceipt` | `["receipt", request_id]` | — | Trustless provenance verification receipt |
@@ -251,8 +251,8 @@ request_randomness(seed, callback_program, callback_instruction)
 | Fast/queue path output | `SHA256(pool_entropy ‖ request_id ‖ slot_hash)` |
 | Aggregated entropy | `SHA256(ee_v4_entropy ‖ slot_hash)` |
 | EE V4 commitment | `SHA256(secret ‖ nonce ‖ contributor_pubkey)` |
-| Game seed output | `SHA256(pool_entropy ‖ game_id)` |
-| Validator eligibility | `SHA256(SHA256(pool_entropy ‖ ee_round_id) ‖ contributor_pubkey)[0..8] < COMMIT_SELECTION_THRESHOLD` |
+| Game seed output | `SHA256(pool_entropy ‖ game_id ‖ payer ‖ slot_hash)` |
+| Validator eligibility | `SHA256(SHA256(pool_entropy ‖ ee_round_id) ‖ validator_reg.identity)[0..8] < COMMIT_SELECTION_THRESHOLD` |
 | Per-validator reward | `original_fees × 95% ÷ reveal_count` |
 
 ## Economics
@@ -260,7 +260,7 @@ request_randomness(seed, callback_program, callback_instruction)
 | Item | Amount |
 |------|--------|
 | Standard request fee | 0.01 XNT (default for all dApps) |
-| Premium request fee | 0.05 XNT (set by protocol authority via `update_dapp_fee`) |
+| Premium request fee | 0.05 XNT (set by dApp authority via `update_dapp_fee`) |
 | Game seed fee | 0.001 XNT — flows to validators via FeeEscrow, same as request fees |
 | EE V4 stake (per commit) | 0.01 XNT — returned in full on valid reveal; forfeited on miss |
 | Crank reward | 5% of round fees to `distribute_fees` caller (V4.5) |
@@ -298,21 +298,24 @@ All fees — both `request_randomness` and `game_seed` — accumulate in the rou
 | 40 | 1 | `fee_distributed` (bool) — set by `distribute_fees`; required before `claim_validator_reward` |
 | 41 | 1 | `bump` (u8) |
 
-### ValidatorRegistration (139 bytes)
+### ValidatorRegistration (171 bytes — grew from 139 in V4.6)
 
 | Offset | Size | Field |
 |--------|------|-------|
 | 0 | 8 | Anchor discriminator |
-| 8 | 32 | `identity` (Pubkey) |
+| 8 | 32 | `identity` (Pubkey — cold key; always used for eligibility hash) |
 | 40 | 32 | `vote_account` (Pubkey) |
 | 72 | 32 | `stake_account` (Pubkey) |
 | 104 | 8 | `verified_stake` (u64) — re-verified on each refresh |
 | 112 | 8 | `registered_slot` (u64) |
 | 120 | 8 | `last_active_slot` (u64) — updated on successful commit |
 | 128 | 8 | `last_round_participated` (u64) |
-| 136 | 1 | `consecutive_misses` (u8) — 3+ triggers deactivation |
+| 136 | 1 | `consecutive_misses` (u8) — 5+ triggers deactivation (V4.6; was 3) |
 | 137 | 1 | `active` (bool) |
 | 138 | 1 | `bump` (u8) |
+| 139 | 32 | `x1_randomness_authority` (Pubkey — hot key for commit/reveal/claim; equals identity until `rotate_randomness_authority`. **Appended V4.6 — check `data.length >= 171` before reading.**) |
+
+> **V4.6 migration required:** Run `PAYER_KEYPAIR=~/.config/solana/x1randomness-key.json node keeper/migrate-v46.js` immediately after deploying V4.6. Until migrated, ALL instructions that deserialize `ValidatorRegistration` will fail.
 
 ### ValidatorReveal (82 bytes)
 
@@ -423,20 +426,32 @@ Tests 21 instructions in sequence. The EE V4 commit/reveal/finalize cycle waits 
 
 ## Running a Validator
 
+Requirements: ≥1,000 XNT delegated stake, active vote account voting within 500 slots.
+
 ```bash
 cd keeper && npm install
 
-# Register your validator (one-time)
+# Register your validator (one-time, identity key required)
 VALIDATOR_KEYPAIR=/path/to/identity.json node validator-daemon.js --register
 
-# Run your personal validator daemon (holds only your identity key)
+# Run with identity key signing everything (simplest setup)
 VALIDATOR_KEYPAIR=/path/to/identity.json node validator-daemon.js --loop
 
-# Optionally run the permissionless crank (anyone can run this)
-node run-round.js --loop
-```
+# V4.6: Run with a hot key — identity key stays cold; hot key signs commit/reveal/claim
+VALIDATOR_KEYPAIR=/path/to/identity.json \
+  X1_RANDOMNESS_KEYPAIR=/path/to/hot-key.json \
+  node validator-daemon.js --loop
 
-Requirements: ≥1,000 XNT delegated stake, active vote account voting within 500 slots.
+# V4.6: Rotate to a hot key (one-time setup, identity key signature required)
+VALIDATOR_KEYPAIR=/path/to/identity.json \
+  node validator-daemon.js --rotate-authority <hot_key_pubkey>
+
+# Deregister (identity key required)
+VALIDATOR_KEYPAIR=/path/to/identity.json node validator-daemon.js --deregister
+
+# Permissionless crank (anyone can run this — earns 5% crank reward)
+CRANK_KEYPAIR=/path/to/any-key.json node run-round.js --loop
+```
 
 To reduce `init_ee_round` races when running multiple validators, stagger their poll intervals:
 
@@ -565,7 +580,7 @@ All four CPI instructions enforce `ee_v4_program.key() == ENTROPY_ENGINE_V4`. Pa
 `n_contributors`, `m_threshold`, and `binding_slot` in `init_ee_round` are derived from protocol constants — no caller can override committee size, threshold, or timing.
 
 ### On-Chain Validator Selection
-`commit_via_ee` enforces entropy-derived eligibility — no external actor decides who participates. Selection is deterministic from pool entropy.
+`commit_via_ee` enforces entropy-derived eligibility — no external actor decides who participates. Selection is deterministic from pool entropy. The eligibility hash uses `validator_reg.identity` (the cold key), not the hot key, so selection probability is stable across hot-key rotations.
 
 ### Slot Hash Mixing
 Both `finalize_via_ee` and `aggregate_from_ee` read the current slot hash from the SlotHashes sysvar. Slot hashes are not knowable before the slot completes, resisting output pre-computation.
@@ -598,6 +613,39 @@ If an EE V4 round is cancelled (status byte 140 == 3), `refund_request` lets req
 `distribute_fees` no longer sends any share to an insurance fund. 100% of fees go to protocol participants: 5% crank, 95% validators. `claim_validator_fees` (dust sweep) sends residual lamports to the `protocol_config.authority` wallet. The `insurance_fund` field in `ProtocolConfig` is retained for layout compatibility but is no longer used.
 
 ## Changelog
+
+### V4.6 (2026-05-27) — key separation, n=7/m=5, explicit refresh errors
+
+**Program (compiled; deploy pending):**
+- **Key separation** — `ValidatorRegistration` gains `x1_randomness_authority` hot key at offset 139 (size 139→171 bytes). Hot key can sign `commit_via_ee`, `reveal_via_ee`, `claim_validator_reward`. Identity cold key required for `register_validator`, `refresh_validator_status`, `deregister_validator`, `rotate_randomness_authority`. Eligibility hash always uses `identity` (not hot key) so selection probability is stable across rotations.
+- **n=7, m=5** — `init_ee_round` now passes `n=EE_V4_N_CONTRIBUTORS(7)`, `m=EE_V4_M_THRESHOLD(5)` (was n=2, m=2). All 7 selected validators must commit; 5 reveals suffice to finalize (2 may miss the reveal window without blocking the round).
+- **`VALIDATOR_MAX_CONSECUTIVE_MISSES = 5`** — validators can miss 5 rounds before deactivation (was 3), giving more tolerance for network hiccups at n=7.
+- **`refresh_validator_status` explicit errors** — returns `InsufficientValidatorStake` or `ValidatorNotActivelyVoting` instead of a generic error, making recovery easier.
+- **New instructions** — `migrate_validator_registration` (permissionless, 139→171 bytes), `rotate_randomness_authority` (identity-signed), `revoke_randomness_authority` (identity-signed, resets to identity).
+
+**Keeper (`validator-daemon.js`):**
+- `X1_RANDOMNESS_KEYPAIR` env var — hot key path for commit/reveal/claim; identity key used when unset.
+- `--rotate-authority <pubkey>` flag — sends `rotate_randomness_authority` and exits.
+- `--deregister` flag — sends `deregister_validator` and exits.
+- Reward sweep scans both identity and hot key for unclaimed `ValidatorReveal` PDAs.
+- Commitment hash uses hot key pubkey: `SHA256(secret ‖ nonce ‖ hotKey.publicKey)`.
+- Refresh errors now produce specific log messages for `InsufficientValidatorStake` / `ValidatorNotActivelyVoting`.
+
+**Migration (`keeper/migrate-v46.js`):**
+- Scans all `ValidatorRegistration` accounts by discriminator, reallocates 139→171 bytes, writes `identity` as default `x1_randomness_authority`. Run immediately after V4.6 deploy.
+
+**Post-deploy sequence:**
+```bash
+# 1. Run migration (before ANY validator activity)
+PAYER_KEYPAIR=~/.config/solana/x1randomness-key.json node keeper/migrate-v46.js
+
+# 2. Restart all validator daemons
+sudo systemctl restart x1randomness-validator   # owlx1 server (systemd)
+# xen_cat: pkill -f validator-daemon.js && VALIDATOR_KEYPAIR=... nohup node keeper/validator-daemon.js --loop ...
+
+# 3. Optionally rotate to hot keys (any time after migration)
+VALIDATOR_KEYPAIR=/path/to/identity.json node keeper/validator-daemon.js --rotate-authority <hotkey_pubkey>
+```
 
 ### V4.5 (2026-05-20) — no insurance fund; 95% to validators; request history lookup
 

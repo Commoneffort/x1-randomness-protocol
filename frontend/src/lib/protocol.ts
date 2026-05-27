@@ -119,17 +119,18 @@ export interface ValidatorReveal {
 }
 
 export interface ValidatorRegistration {
-  identity: string;          // Pubkey base58
+  identity: string;                  // Pubkey base58
   voteAccount: string;
   stakeAccount: string;
-  verifiedStake: number;     // lamports
+  verifiedStake: number;             // lamports
   registeredSlot: number;
   lastActiveSlot: number;
   lastRoundParticipated: number;
   consecutiveMisses: number;
   active: boolean;
   bump: number;
-  pubkey: string;            // PDA base58
+  x1RandomnessAuthority?: string;    // Pubkey base58 — hot key (V4.6); equals identity until rotated
+  pubkey: string;                    // PDA base58
 }
 
 export interface RequestState {
@@ -378,6 +379,8 @@ export class ProtocolClient {
       consecutiveMisses:      d[136],
       active:                 readBool(d, 137),
       bump:                   d[138],
+      // V4.6: x1_randomness_authority hot key at offset 139 (accounts are 171 bytes post-migration)
+      x1RandomnessAuthority:  d.length >= 171 ? readPubkey(d, 139) : undefined,
       pubkey:                 pda.toBase58(),
     };
   }

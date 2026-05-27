@@ -12,9 +12,15 @@
  *
  * Usage:
  *   VALIDATOR_KEYPAIR=/path/to/identity.json node validator-daemon.js --register
+ *   VALIDATOR_KEYPAIR=/path/to/identity.json node validator-daemon.js --deregister
  *   VALIDATOR_KEYPAIR=/path/to/identity.json node validator-daemon.js [--loop]
+ *   VALIDATOR_KEYPAIR=<id> node validator-daemon.js --rotate-authority <hotkey_pubkey>
+ *   VALIDATOR_KEYPAIR=<id> X1_RANDOMNESS_KEYPAIR=<hotkey> node validator-daemon.js [--loop]
  *
- * The identity keypair is the same key registered via register_validator.
+ * VALIDATOR_KEYPAIR — identity (cold) key. Required for register/deregister/rotate/init_ee_round.
+ * X1_RANDOMNESS_KEYPAIR — optional hot key for commit/reveal/claim (V4.6+). If unset, identity
+ *   signs all operations. Set after calling --rotate-authority.
+ *
  * Per-round commit entropy (secret + nonce) is persisted to
  * ~/.config/x1randomness/vd-secrets-<pubkeyPrefix>.json before each commit
  * so they survive process restarts. This file does NOT contain the validator
@@ -71,12 +77,34 @@ const identity = Keypair.fromSecretKey(
   new Uint8Array(JSON.parse(fs.readFileSync(keypairPath.replace(/^~/, os.homedir()))))
 );
 
-const doLoop       = process.argv.includes("--loop");
-const doRegister   = process.argv.includes("--register");
+// V4.6 hot key: signs commit/reveal/claim so the cold identity key can stay offline.
+// If X1_RANDOMNESS_KEYPAIR is not set, hotKey === identity (no behavioral change).
+const hotKeyPath = process.env.X1_RANDOMNESS_KEYPAIR;
+const hotKey = hotKeyPath
+  ? Keypair.fromSecretKey(new Uint8Array(JSON.parse(fs.readFileSync(hotKeyPath.replace(/^~/, os.homedir())))))
+  : identity;
+
+const doLoop            = process.argv.includes("--loop");
+const doRegister        = process.argv.includes("--register");
+const doDeregister      = process.argv.includes("--deregister");
+const doRotateAuthority = process.argv.includes("--rotate-authority");
+const rotateAuthorityTarget = doRotateAuthority
+  ? process.argv[process.argv.indexOf("--rotate-authority") + 1]
+  : null;
+
 const STATE_FILE   = path.join(os.homedir(), ".config", "x1randomness", `vd-secrets-${identity.publicKey.toBase58().slice(0, 8)}.json`);
 const eeRoundCache = new Map(); // eeRoundId (number) → PublicKey; avoids repeated getProgramAccounts scans
 
+// refresh_validator_status backoff — the program returns Ok(()) even when stake/vote checks
+// fail (it just sets active=false). Without backoff the daemon would call refresh every 15s
+// forever while the validator's stake account is activating or delinquent.
+let refreshFailCount     = 0;
+let refreshCooldownUntil = 0; // ms timestamp; 0 = no cooldown
+
 console.log(`Validator   : ${identity.publicKey.toBase58()}`);
+if (!hotKey.publicKey.equals(identity.publicKey)) {
+  console.log(`Hot key     : ${hotKey.publicKey.toBase58()}`);
+}
 console.log(`RPC         : ${RPC}`);
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -88,17 +116,17 @@ function u64le(n) { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(n)); re
 function findPda(seeds) { return PublicKey.findProgramAddressSync(seeds, PROGRAM_ID); }
 function readU64(d, o)  { return Number(d.readBigUInt64LE(o)); }
 
-async function send(ix, label) {
+async function send(ix, label, signers = [identity]) {
   const MAX_ATTEMPTS = 3;
   let lastErr;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
       const tx = new Transaction();
       if (Array.isArray(ix)) { ix.forEach(i => tx.add(i)); } else { tx.add(ix); }
-      tx.feePayer = identity.publicKey;
+      tx.feePayer = signers[0].publicKey;
       const { blockhash } = await conn.getLatestBlockhash("confirmed");
       tx.recentBlockhash = blockhash;
-      const sig = await sendAndConfirmTransaction(conn, tx, [identity], { commitment: "confirmed" });
+      const sig = await sendAndConfirmTransaction(conn, tx, signers, { commitment: "confirmed" });
       console.log(`  ✓ ${label}: ${sig.slice(0, 20)}…`);
       return sig;
     } catch (e) {
@@ -213,7 +241,7 @@ function ixCommit(eeRoundId, eeRound, voteAccount, stakeAccount, commitment) {
       { pubkey: pool,                    isSigner: false, isWritable: false },
       { pubkey: wr,                      isSigner: false, isWritable: false },
       { pubkey: eeRound,                 isSigner: false, isWritable: true  },
-      { pubkey: identity.publicKey,      isSigner: true,  isWritable: true  },
+      { pubkey: hotKey.publicKey,        isSigner: true,  isWritable: true  }, // contributor; hot key after rotation
       { pubkey: reg,                     isSigner: false, isWritable: true  },
       { pubkey: voteAccount,             isSigner: false, isWritable: false },
       { pubkey: stakeAccount,            isSigner: false, isWritable: false },
@@ -227,14 +255,14 @@ function ixCommit(eeRoundId, eeRound, voteAccount, stakeAccount, commitment) {
 function ixReveal(eeRoundId, eeRound, secret, nonce) {
   const [cfg] = cfgPda();
   const [wr]  = wrapperPda(eeRoundId);
-  const [vr]  = vrPda(eeRound, identity.publicKey);
+  const [vr]  = vrPda(eeRound, hotKey.publicKey); // vr seeded by contributor = hot key after rotation
   return new TransactionInstruction({ programId: PROGRAM_ID,
     keys: [
       { pubkey: cfg,                     isSigner: false, isWritable: false },
       { pubkey: wr,                      isSigner: false, isWritable: false },
       { pubkey: eeRound,                 isSigner: false, isWritable: true  },
       { pubkey: vr,                      isSigner: false, isWritable: true  },
-      { pubkey: identity.publicKey,      isSigner: true,  isWritable: true  },
+      { pubkey: hotKey.publicKey,        isSigner: true,  isWritable: true  }, // contributor
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       { pubkey: EE_V4,                   isSigner: false, isWritable: false },
     ],
@@ -297,15 +325,15 @@ function ixCancelEeRound(eeRoundPubkey, contributorPubkeys) {
 
 function ixClaimReward(eeRound, protocolRound) {
   const [escrow] = escrowPda(protocolRound);
-  const [vr]     = vrPda(eeRound, identity.publicKey);
+  const [vr]     = vrPda(eeRound, hotKey.publicKey); // vr seeded by contributor = hot key after rotation
   // Account order must match ClaimValidatorReward struct:
   // validator_reveal, fee_escrow, ee_round, contributor
   return new TransactionInstruction({ programId: PROGRAM_ID,
     keys: [
-      { pubkey: vr,                 isSigner: false, isWritable: true  },
-      { pubkey: escrow,             isSigner: false, isWritable: true  },
-      { pubkey: eeRound,            isSigner: false, isWritable: false },
-      { pubkey: identity.publicKey, isSigner: true,  isWritable: true  },
+      { pubkey: vr,                  isSigner: false, isWritable: true  },
+      { pubkey: escrow,              isSigner: false, isWritable: true  },
+      { pubkey: eeRound,             isSigner: false, isWritable: false },
+      { pubkey: hotKey.publicKey,    isSigner: true,  isWritable: true  },
     ],
     data: disc("claim_validator_reward"),
   });
@@ -339,12 +367,43 @@ async function runOnce() {
   const stakeAccount = new PublicKey(regAcct.data.slice(72, 104));
   const isActive = regAcct.data[137] !== 0;
   if (!isActive) {
+    const now = Date.now();
+    if (now < refreshCooldownUntil) {
+      const waitSecs = Math.ceil((refreshCooldownUntil - now) / 1000);
+      console.log(`  Validator inactive — refresh cooldown active (${waitSecs}s remaining); check stake/vote status`);
+      return;
+    }
     console.log("  Validator marked inactive — calling refresh_validator_status to reactivate");
+    let refreshSucceeded = false;
     try {
       await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status");
-      console.log("  ✓ Reactivated — will participate from next round");
+      // V4.6+: program returns explicit Err on failure (InsufficientValidatorStake /
+      // ValidatorNotActivelyVoting). If send() returns without throwing, we were reactivated.
+      refreshSucceeded = true;
     } catch (e) {
-      console.log("  ✗ Refresh failed:", e.message, "— check stake/vote account status");
+      const msg = [e.message, ...(e.logs ?? [])].join(" ");
+      if (msg.includes("InsufficientValidatorStake") || msg.includes("0x178c")) {
+        console.log("  ✗ Insufficient stake — check stake account balance (need ≥ 1000 XNT)");
+      } else if (msg.includes("ValidatorNotActivelyVoting") || msg.includes("0x178d")) {
+        console.log("  ✗ Not actively voting — check vote account recency");
+      } else {
+        // Pre-V4.6 program (silent Ok) or unknown error — fall through to re-read.
+        // Re-read the account to know whether it actually activated us.
+        const freshReg = await conn.getAccountInfo(regPda);
+        if (freshReg && freshReg.data[137] !== 0) {
+          refreshSucceeded = true;
+        }
+      }
+    }
+    if (refreshSucceeded) {
+      refreshFailCount = 0;
+      refreshCooldownUntil = 0;
+      console.log("  ✓ Reactivated — will participate from next round");
+    } else {
+      refreshFailCount++;
+      const delaySecs = Math.min(60 * Math.pow(2, refreshFailCount - 1), 900);
+      refreshCooldownUntil = Date.now() + delaySecs * 1000;
+      console.log(`  ✗ Still inactive after refresh (attempt ${refreshFailCount}) — backing off ${delaySecs}s; check stake/vote account`);
     }
     return;
   }
@@ -381,16 +440,16 @@ async function runOnce() {
       }
       throw initErr;
     }
-    console.log(`  ✓ n=2, m=2, binding_slot=current+675 (derived on-chain)`);
+    console.log(`  ✓ n=7, m=5, binding_slot=current+675 (derived on-chain)`);
     // Commit immediately — don't wait for the next poll; the 200-slot window (~75s)
     // can expire before the next iteration, especially if getProgramAccounts is slow.
     const firstSecrets = { secret: crypto.randomBytes(32), nonce: crypto.randomBytes(32) };
     saveSecrets(eeV4RoundId, firstSecrets.secret, firstSecrets.nonce);
     const firstCommitment = crypto.createHash("sha256")
-      .update(Buffer.concat([firstSecrets.secret, firstSecrets.nonce, identity.publicKey.toBuffer()]))
+      .update(Buffer.concat([firstSecrets.secret, firstSecrets.nonce, hotKey.publicKey.toBuffer()]))
       .digest();
     try {
-      await send(ixCommit(eeV4RoundId, newEeRoundPubkey, voteAccount, stakeAccount, firstCommitment), "commit_via_ee");
+      await send(ixCommit(eeV4RoundId, newEeRoundPubkey, voteAccount, stakeAccount, firstCommitment), "commit_via_ee", [hotKey]);
       saveSecrets(eeV4RoundId, firstSecrets.secret, firstSecrets.nonce, true);
       console.log(`  ✓ Committed to EE round ${eeV4RoundId} immediately after init`);
     } catch (commitErr) {
@@ -438,7 +497,7 @@ async function runOnce() {
   const bindingSlot    = Number(eeAcct.data.readBigUInt64LE(66));
 
   // ── Commit phase ────────────────────────────────────────────────────────────
-  const [vrAddr] = vrPda(eeRoundPubkey, identity.publicKey);
+  const [vrAddr] = vrPda(eeRoundPubkey, hotKey.publicKey); // VR PDA uses contributor = hot key after rotation
   const vrAcct   = await conn.getAccountInfo(vrAddr);
   const revealed = !!vrAcct;
 
@@ -475,10 +534,10 @@ async function runOnce() {
       // Attempt commit — idempotent on-chain. Re-attempt prevents the failure mode where a
       // network error drops the tx but leaves uncommitted secrets on disk.
       const commitment = crypto.createHash("sha256")
-        .update(Buffer.concat([secrets.secret, secrets.nonce, identity.publicKey.toBuffer()]))
+        .update(Buffer.concat([secrets.secret, secrets.nonce, hotKey.publicKey.toBuffer()]))
         .digest();
       try {
-        await send(ixCommit(eeV4RoundId, eeRoundPubkey, voteAccount, stakeAccount, commitment), "commit_via_ee");
+        await send(ixCommit(eeV4RoundId, eeRoundPubkey, voteAccount, stakeAccount, commitment), "commit_via_ee", [hotKey]);
         saveSecrets(eeV4RoundId, secrets.secret, secrets.nonce, true);
       } catch (e) {
         if (e.message?.includes("already") || e.message?.includes("0x0")) {
@@ -500,7 +559,7 @@ async function runOnce() {
           let isContributor = false;
           for (let i = 0; i < commitCount; i++) {
             const base = 158 + i * 68;
-            if (eeDataFresh && new PublicKey(eeDataFresh.slice(base, base + 32)).equals(identity.publicKey)) {
+            if (eeDataFresh && new PublicKey(eeDataFresh.slice(base, base + 32)).equals(hotKey.publicKey)) {
               isContributor = true;
               break;
             }
@@ -585,16 +644,16 @@ async function runOnce() {
             }
             throw initErr;
           }
-          console.log(`  ✓ EE round ${nextEeId} opened — n=2, m=2, binding_slot=current+675`);
+          console.log(`  ✓ EE round ${nextEeId} opened — n=7, m=5, binding_slot=current+675`);
           // Commit immediately — don't return and wait for the next poll, the
           // 200-slot commit window (~75s) can expire before the daemon polls again.
           const freshSecrets = { secret: crypto.randomBytes(32), nonce: crypto.randomBytes(32) };
           saveSecrets(nextEeId, freshSecrets.secret, freshSecrets.nonce);
           const freshCommitment = crypto.createHash("sha256")
-            .update(Buffer.concat([freshSecrets.secret, freshSecrets.nonce, identity.publicKey.toBuffer()]))
+            .update(Buffer.concat([freshSecrets.secret, freshSecrets.nonce, hotKey.publicKey.toBuffer()]))
             .digest();
           try {
-            await send(ixCommit(nextEeId, newEeRoundPubkey, voteAccount, stakeAccount, freshCommitment), "commit_via_ee");
+            await send(ixCommit(nextEeId, newEeRoundPubkey, voteAccount, stakeAccount, freshCommitment), "commit_via_ee", [hotKey]);
             saveSecrets(nextEeId, freshSecrets.secret, freshSecrets.nonce, true);
             console.log(`  ✓ Committed to EE round ${nextEeId} immediately after init`);
           } catch (commitErr) {
@@ -626,7 +685,7 @@ async function runOnce() {
       return;
     }
     try {
-      await send(ixReveal(eeV4RoundId, eeRoundPubkey, secrets.secret, secrets.nonce), "reveal_via_ee");
+      await send(ixReveal(eeV4RoundId, eeRoundPubkey, secrets.secret, secrets.nonce), "reveal_via_ee", [hotKey]);
       clearSecrets();
     } catch (e) {
       if (e.message?.includes("already") || e.message?.includes("0x0")) {
@@ -665,69 +724,107 @@ async function runOnce() {
 // The crank advances the round immediately after distribute_fees, so by the time
 // the daemon polls, currentRound is already N+1. We must scan ALL unclaimed
 // ValidatorReveal PDAs for this validator and claim any with fees distributed.
+// After key rotation, old reveals have contributor==identity; new reveals have
+// contributor==hotKey. We scan both and claim with the appropriate signer.
 async function sweepUnclaimedRewards() {
   const REVEAL_DISC = crypto.createHash("sha256")
     .update("account:ValidatorReveal").digest().slice(0, 8);
 
-  const myReveals = await conn.getProgramAccounts(PROGRAM_ID, {
-    filters: [
-      { memcmp: { offset: 0,  bytes: bs58.encode(REVEAL_DISC) } },
-      { memcmp: { offset: 8,  bytes: identity.publicKey.toBase58() } },
-      { memcmp: { offset: 80, bytes: bs58.encode(Buffer.from([0])) } }, // claimed=false
-    ],
-  });
-  if (!myReveals.length) return;
-
-  // Batch-fetch all fee escrows (chunks of 100 — RPC limit)
-  const escrowAddrs = myReveals.map(r => escrowPda(readU64(r.account.data, 72))[0]);
-  const escrowAccts = [];
-  for (let i = 0; i < escrowAddrs.length; i += 100) {
-    const chunk = await conn.getMultipleAccountsInfo(escrowAddrs.slice(i, i + 100));
-    escrowAccts.push(...chunk);
+  // Build scan list: [{contributor, signer}]. Deduplicate when hotKey === identity.
+  const scanPairs = [{ contributor: identity.publicKey, signer: identity }];
+  if (!hotKey.publicKey.equals(identity.publicKey)) {
+    scanPairs.push({ contributor: hotKey.publicKey, signer: hotKey });
   }
 
-  let claimed = 0;
-  for (let i = 0; i < myReveals.length; i++) {
-    const d  = myReveals[i].account.data;
-    const ea = escrowAccts[i];
-    if (!ea || ea.data.length < 42) continue;
-    const feeDistributed = ea.data[40] !== 0;
-    const originalFees   = Number(ea.data.readBigUInt64LE(24));
-    if (!feeDistributed || originalFees === 0) continue;
-
-    const eeRoundKey    = new PublicKey(d.slice(40, 72));
-    const protocolRound = readU64(d, 72);
-    const vrPubkey      = myReveals[i].pubkey;
-    const escrowPubkey  = escrowAddrs[i];
-    const claimIx = new TransactionInstruction({ programId: PROGRAM_ID,
-      keys: [
-        { pubkey: vrPubkey,           isSigner: false, isWritable: true  },
-        { pubkey: escrowPubkey,       isSigner: false, isWritable: true  },
-        { pubkey: eeRoundKey,         isSigner: false, isWritable: false },
-        { pubkey: identity.publicKey, isSigner: true,  isWritable: true  },
+  let totalUnclaimed = 0;
+  for (const { contributor, signer } of scanPairs) {
+    const myReveals = await conn.getProgramAccounts(PROGRAM_ID, {
+      filters: [
+        { memcmp: { offset: 0,  bytes: bs58.encode(REVEAL_DISC) } },
+        { memcmp: { offset: 8,  bytes: contributor.toBase58() } },
+        { memcmp: { offset: 80, bytes: bs58.encode(Buffer.from([0])) } }, // claimed=false
       ],
-      data: disc("claim_validator_reward"),
     });
-    try {
-      await send(claimIx, `claim_validator_reward(round=${protocolRound})`);
-      claimed++;
-    } catch (e) {
-      const msg = e.message ?? "";
-      const silent = msg.includes("RewardAlreadyClaimed") || msg.includes("already")
-                  || msg.includes("FeeEscrowInsufficient") || msg.includes("0x177f")
-                  || msg.includes("InvalidEeV4RoundResult") || msg.includes("0x1784");
-      if (!silent) console.warn(`  Sweep claim failed for round ${protocolRound}: ${e.message}`);
+    if (!myReveals.length) continue;
+    totalUnclaimed += myReveals.length;
+
+    // Batch-fetch all fee escrows (chunks of 100 — RPC limit)
+    const escrowAddrs = myReveals.map(r => escrowPda(readU64(r.account.data, 72))[0]);
+    const escrowAccts = [];
+    for (let i = 0; i < escrowAddrs.length; i += 100) {
+      const chunk = await conn.getMultipleAccountsInfo(escrowAddrs.slice(i, i + 100));
+      escrowAccts.push(...chunk);
     }
-  }
-  if (claimed === 0 && myReveals.length > 0) {
-    const withFees = myReveals.filter((_, i) => {
+
+    let claimed = 0;
+    for (let i = 0; i < myReveals.length; i++) {
+      const d  = myReveals[i].account.data;
       const ea = escrowAccts[i];
-      return ea && ea.data.length >= 42 && ea.data[40] !== 0 && Number(ea.data.readBigUInt64LE(24)) > 0;
-    }).length;
-    if (withFees === 0) {
-      console.log(`  ${myReveals.length} unclaimed reveal(s) — all empty rounds, no fees to collect`);
+      if (!ea || ea.data.length < 42) continue;
+      const feeDistributed = ea.data[40] !== 0;
+      const originalFees   = Number(ea.data.readBigUInt64LE(24));
+      if (!feeDistributed || originalFees === 0) continue;
+
+      const eeRoundKey    = new PublicKey(d.slice(40, 72));
+      const protocolRound = readU64(d, 72);
+      const vrPubkey      = myReveals[i].pubkey;
+      const escrowPubkey  = escrowAddrs[i];
+      const claimIx = new TransactionInstruction({ programId: PROGRAM_ID,
+        keys: [
+          { pubkey: vrPubkey,      isSigner: false, isWritable: true  },
+          { pubkey: escrowPubkey,  isSigner: false, isWritable: true  },
+          { pubkey: eeRoundKey,    isSigner: false, isWritable: false },
+          { pubkey: contributor,   isSigner: true,  isWritable: true  },
+        ],
+        data: disc("claim_validator_reward"),
+      });
+      try {
+        await send(claimIx, `claim_validator_reward(round=${protocolRound})`, [signer]);
+        claimed++;
+      } catch (e) {
+        const msg = e.message ?? "";
+        const silent = msg.includes("RewardAlreadyClaimed") || msg.includes("already")
+                    || msg.includes("FeeEscrowInsufficient") || msg.includes("0x177f")
+                    || msg.includes("InvalidEeV4RoundResult") || msg.includes("0x1784");
+        if (!silent) console.warn(`  Sweep claim failed for round ${protocolRound}: ${e.message}`);
+      }
+    }
+
+    if (claimed === 0 && myReveals.length > 0) {
+      const withFees = myReveals.filter((_, i) => {
+        const ea = escrowAccts[i];
+        return ea && ea.data.length >= 42 && ea.data[40] !== 0 && Number(ea.data.readBigUInt64LE(24)) > 0;
+      }).length;
+      if (withFees === 0) {
+        console.log(`  ${myReveals.length} unclaimed reveal(s) for ${contributor.toBase58().slice(0, 8)}… — all empty rounds, no fees to collect`);
+      }
     }
   }
+}
+
+// ── Key rotation ────────────────────────────────────────────────────────────────
+
+function ixRotateRandomnessAuthority(newAuthority) {
+  const [reg] = valRegPda(identity.publicKey);
+  return new TransactionInstruction({ programId: PROGRAM_ID,
+    keys: [
+      { pubkey: reg,                isSigner: false, isWritable: true  },
+      { pubkey: identity.publicKey, isSigner: true,  isWritable: false },
+    ],
+    data: Buffer.concat([disc("rotate_randomness_authority"), new PublicKey(newAuthority).toBuffer()]),
+  });
+}
+
+async function rotateAuthority(newAuthorityStr) {
+  console.log(`\n[rotate-authority] Validator : ${identity.publicKey.toBase58()}`);
+  let newAuthority;
+  try { newAuthority = new PublicKey(newAuthorityStr); } catch (_) {
+    console.error(`  ✗ Invalid pubkey: ${newAuthorityStr}`); process.exit(1);
+  }
+  console.log(`  New authority : ${newAuthority.toBase58()}`);
+  await send(ixRotateRandomnessAuthority(newAuthority), "rotate_randomness_authority");
+  console.log("  ✓ Authority rotated.");
+  console.log(`  Set X1_RANDOMNESS_KEYPAIR=<path_to_hotkey> in your daemon config.`);
 }
 
 // ── Registration helpers ────────────────────────────────────────────────────────
@@ -765,6 +862,18 @@ function ixRegisterValidator(voteAccount, stakeAccount) {
   });
 }
 
+function ixDeregisterValidator() {
+  const [reg] = valRegPda(identity.publicKey);
+  // DeregisterValidator: [validator_registration(mut, close=identity), identity(signer, mut)]
+  return new TransactionInstruction({ programId: PROGRAM_ID,
+    keys: [
+      { pubkey: reg,                isSigner: false, isWritable: true },
+      { pubkey: identity.publicKey, isSigner: true,  isWritable: true },
+    ],
+    data: disc("deregister_validator"),
+  });
+}
+
 async function registerValidator() {
   console.log(`\n[register] Validator : ${identity.publicKey.toBase58()}`);
   const [regPda] = valRegPda(identity.publicKey);
@@ -783,9 +892,32 @@ async function registerValidator() {
   console.log("  ✓ Registered successfully");
 }
 
+async function deregisterValidator() {
+  console.log(`\n[deregister] Validator : ${identity.publicKey.toBase58()}`);
+  const [regPda] = valRegPda(identity.publicKey);
+  if (!await conn.getAccountInfo(regPda)) {
+    console.log("  Not registered.");
+    return;
+  }
+  await send(ixDeregisterValidator(), "deregister_validator");
+  console.log("  ✓ Deregistered — registration account closed, rent returned to identity");
+}
+
 async function main() {
   if (doRegister) {
     await registerValidator();
+    return;
+  }
+  if (doDeregister) {
+    await deregisterValidator();
+    return;
+  }
+  if (doRotateAuthority) {
+    if (!rotateAuthorityTarget) {
+      console.error("Usage: node keeper/validator-daemon.js --rotate-authority <new_pubkey>");
+      process.exit(1);
+    }
+    await rotateAuthority(rotateAuthorityTarget);
     return;
   }
   if (doLoop) {

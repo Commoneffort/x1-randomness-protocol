@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * X1 Randomness Protocol V3 — End-to-End Mainnet Tests
+ * X1 Randomness Protocol V4.6 — End-to-End Mainnet Tests
  *
  * Runs against X1 mainnet: https://rpc.mainnet.x1.xyz
  * Program: BSKTJpgAGHRaSMLA88chYPKuSuD9qbesEcHYmUrBWU7R
@@ -261,18 +261,16 @@ function buildRequestRandomness(requester, seed, callbackProgram, callbackIx, cu
   });
 }
 
-function buildInitEeRound(coordinator, eeRoundId, nContributors, mThreshold, bindingSlot) {
+function buildInitEeRound(coordinator, eeRoundId) {
   const [configPda]       = protocolConfigPda();
   const [wrPda]           = wrapperRoundPda(eeRoundId);
   const [eeRound]         = eeRoundPda(coordinator.publicKey, eeRoundId);
   // coordinator_reg PDA — may not exist if coordinator is not a registered validator
   const [coordinatorReg]  = findPda([Buffer.from("val-reg"), coordinator.publicKey.toBuffer()]);
+  // n, m, binding_slot are all derived on-chain — only eeRoundId is passed
   const data = Buffer.concat([
     disc("init_ee_round"),
     u64le(eeRoundId),
-    Buffer.from([nContributors]),
-    Buffer.from([mThreshold]),
-    u64le(bindingSlot),
   ]);
   return { ix: new TransactionInstruction({
     programId: PROGRAM_ID,
@@ -415,13 +413,14 @@ function buildDistributeFees(round) {
   const [configPda]  = protocolConfigPda();
   const [wrPda]      = wrapperRoundPda(round);
   const [escrowPda]  = feeEscrowPda(round);
+  // V4.5: crank receives 5% immediately; must be a Signer so lamports can be transferred out
   return new TransactionInstruction({
     programId: PROGRAM_ID,
     keys: [
       { pubkey: configPda,              isSigner: false, isWritable: false },
       { pubkey: wrPda,                  isSigner: false, isWritable: false },
       { pubkey: escrowPda,              isSigner: false, isWritable: true },
-      { pubkey: payer.publicKey,        isSigner: false, isWritable: true }, // insurance_fund
+      { pubkey: payer.publicKey,        isSigner: true,  isWritable: true }, // crank (5%)
       { pubkey: SystemProgram.programId,isSigner: false, isWritable: false },
     ],
     data: disc("distribute_fees"),
@@ -553,7 +552,7 @@ function skip(name, reason) {
 
 async function main() {
   console.log("════════════════════════════════════════════════════");
-  console.log("  X1 Randomness Protocol V3 — Mainnet E2E Tests");
+  console.log("  X1 Randomness Protocol V4.6 — Mainnet E2E Tests");
   console.log("════════════════════════════════════════════════════");
   console.log(`Program : ${PROGRAM_ID.toBase58()}`);
   console.log(`Payer   : ${payer.publicKey.toBase58()}`);
@@ -743,14 +742,14 @@ async function main() {
   let finalBindingSlot = 0;
   await test("10. Init EE round via CPI to Entropy Engine V4", async () => {
     // EE V4 has a minimum binding slot offset — probe via doubling until accepted
-    const { ix: _ix, eeRound, wrPda } = buildInitEeRound(payer, eeRoundId, 1, 1, 0); // just to get PDAs
+    const { ix: _ix, eeRound, wrPda } = buildInitEeRound(payer, eeRoundId); // just to get PDAs
     eeRoundAddr = eeRound;
     wrPdaAddr = wrPda;
 
     for (let offset = 300; offset <= 20000; offset = Math.ceil(offset * 1.5)) {
       const slot = await conn.getSlot("confirmed");
       const bindingSlot = slot + offset;
-      const { ix } = buildInitEeRound(payer, eeRoundId, 1, 1, bindingSlot);
+      const { ix } = buildInitEeRound(payer, eeRoundId);
       try {
         await sendIx(ix, [payer], `InitEeRound (id=${eeRoundId})`);
         finalBindingSlot = bindingSlot;
@@ -978,8 +977,8 @@ async function main() {
       const esc = await readAccount(escPda);
       if (!esc) throw new Error("Fee escrow not found");
       const pendingFees = readU64(esc, 8);
-      // fee_distributed flag is at offset 8+8+8+8 = 32 (after disc+pending_fees+round+original_fees)
-      const alreadyDistributed = readBool(esc, 32);
+      // fee_distributed flag at offset 40 (disc8 + pending_fees8 + round8 + original_fees8 + ee_v4_round_id8)
+      const alreadyDistributed = readBool(esc, 40);
       if (alreadyDistributed) {
         console.log("  (already distributed — idempotency guard worked)");
         feesDistributed = true;
@@ -994,9 +993,9 @@ async function main() {
       feesDistributed = true;
       console.log(`  distributed ${pendingFees} lamports (10% insurance + 90% escrow)`);
 
-      // Verify the flag is now set (offset 32)
+      // Verify the flag is now set (offset 40)
       const escAfter = await readAccount(escPda);
-      const flagAfter = readBool(escAfter, 32);
+      const flagAfter = readBool(escAfter, 40);
       if (!flagAfter) throw new Error("fee_distributed flag not set after distribution");
       console.log(`  fee_distributed flag : ${flagAfter} ✓`);
 

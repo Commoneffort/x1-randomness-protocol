@@ -40,6 +40,24 @@ solana program deploy \
 
 Each program upgrade costs approximately 1.25–1.5 XNT from the payer wallet. Check balance before upgrading (`solana balance ~/.config/solana/x1randomness-key.json --url https://rpc.mainnet.x1.xyz`).
 
+### V4.6 post-upgrade sequence
+
+After deploying V4.6, run these steps immediately (before any validator daemon activity):
+
+```bash
+# 1. Run the migration — reallocates all ValidatorRegistration accounts 139→171 bytes
+PAYER_KEYPAIR=~/.config/solana/x1randomness-key.json node keeper/migrate-v46.js
+
+# 2. Restart all validator daemons
+pkill -f validator-daemon.js
+VALIDATOR_KEYPAIR=~/.config/solana/identity.json nohup node keeper/validator-daemon.js --loop > /tmp/validator-daemon.log 2>&1 &
+
+# 3. Optionally rotate to a hot key (can be done any time after migration)
+VALIDATOR_KEYPAIR=~/.config/solana/identity.json node keeper/validator-daemon.js --rotate-authority <hotkey_pubkey>
+```
+
+**Why immediate migration matters:** Until `migrate_validator_registration` is called for each account, ALL instructions that use `Account<ValidatorRegistration>` (commit, refresh, init_ee_round, mark_validator_missed) will fail with a deserialization error. The migration window should be < 30 seconds for 9 validators.
+
 ## Test
 
 ```bash
@@ -61,12 +79,10 @@ The protocol has **no manager, no keeper authority, and no validator selection c
 advance_round          — any signer, when MIN_SLOTS_BETWEEN_ROUNDS elapsed
 create_fee_escrow      — any signer, for valid round
 init_ee_round          — any registered active validator (first wins, pays rent as coordinator)
-                         n=MIN_EE_M_THRESHOLD(2), m=MIN_EE_M_THRESHOLD(2),
+                         n=EE_V4_N_CONTRIBUTORS(7), m=EE_V4_M_THRESHOLD(5),
                          binding_slot=current+EE_V4_MIN_BINDING_SLOTS(675) — derived on-chain
-                         NOTE: n was changed from MAX_COMMITTEE_SIZE(10) to MIN_EE_M_THRESHOLD(2)
-                         because the EE program requires ALL n validators to commit before
-                         transitioning to RevealPhase. With n=10 and <10 validators, rounds
-                         can never complete. n=m=2 means both validators fill the round.
+                         NOTE: n=7 requires 7 of 9 active validators to commit per round;
+                         m=5 means 5 reveals suffice to finalize (2 may miss the reveal window).
 commit_via_ee          — any eligible validator (eligibility derived from entropy, not caller choice)
                          must commit BEFORE commit_deadline (EE round offset 50)
 reveal_via_ee          — validators who committed; must reveal AFTER commit_deadline (offset 50)
@@ -83,10 +99,12 @@ Eligibility is derived deterministically from pool entropy — no keeper can con
 
 ```
 round_seed  = SHA256(entropy_pool.current_entropy ‖ ee_v4_round_id)
-val_hash    = SHA256(round_seed ‖ contributor.pubkey)
+val_hash    = SHA256(round_seed ‖ validator_reg.identity)   ← identity, not hot key
 selector    = val_hash[0..8] as u64
 eligible    = selector < COMMIT_SELECTION_THRESHOLD
 ```
+
+Using `identity` (not the signing key) keeps selection probability stable across hot-key rotations.
 
 `COMMIT_SELECTION_THRESHOLD = u64::MAX` currently (all active validators eligible). Lower this constant as the validator set grows to cap expected committee size probabilistically.
 
@@ -95,7 +113,7 @@ eligible    = selector < COMMIT_SELECTION_THRESHOLD
 | Process | Keys held | Purpose |
 |---|---|---|
 | `run-round.js` (crank) | Crank key only | Calls permissionless on-chain cranks. Zero protocol authority. |
-| `validator-daemon.js` | Own identity key only | Each validator runs independently. Monitors chain, commits, reveals, claims rewards. |
+| `validator-daemon.js` | Identity key (or hot key post-V4.6) | Each validator runs independently. Monitors chain, commits, reveals, claims rewards. |
 
 The crank has no special power — any node can replace it. Stopping the crank delays round advancement but cannot corrupt randomness.
 
@@ -110,12 +128,25 @@ CRANK_KEYPAIR=~/.config/solana/identity.json nohup node run-round.js --loop > /t
 # Validator daemon (one per validator, uses identity key):
 VALIDATOR_KEYPAIR=~/.config/solana/identity.json nohup node validator-daemon.js --loop > /tmp/validator-daemon.log 2>&1 &
 
+# Validator daemon with hot key (V4.6+, after rotate_randomness_authority):
+VALIDATOR_KEYPAIR=~/.config/solana/identity.json X1_RANDOMNESS_KEYPAIR=~/.config/solana/hotkey.json nohup node validator-daemon.js --loop > /tmp/validator-daemon.log 2>&1 &
+
 # First-time validator registration:
 VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --register
+
+# Deregister a validator:
+VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --deregister
+
+# Post-V4.6 upgrade: run migration immediately after deploying the new .so
+PAYER_KEYPAIR=~/.config/solana/x1randomness-key.json node keeper/migrate-v46.js
+
+# Rotate to a hot key (after migration):
+VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --rotate-authority <hotkey_pubkey>
 ```
 
 **Validator daemon env vars:**
-- `VALIDATOR_KEYPAIR` — required; path to identity keypair
+- `VALIDATOR_KEYPAIR` — required; path to identity keypair (cold key, used to sign `init_ee_round`, `rotate_randomness_authority`, `register_validator`)
+- `X1_RANDOMNESS_KEYPAIR` — optional (V4.6+); path to hot keypair for commit/reveal/claim. If unset, identity key is used for all operations.
 - `POLL_MS` — optional; poll interval in milliseconds (default 15000). Stagger multiple validators to reduce `init_ee_round` races: `POLL_MS=13000` on one, `POLL_MS=17000` on another.
 - `RPC_URL` — optional; RPC endpoint (default `https://rpc.mainnet.x1.xyz`)
 
@@ -138,6 +169,8 @@ VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --regi
 - **`verify_entropy`** — requires a fulfilled `RequestState`. `derived_output` copied from stored value, not recomputed.
 - **Staleness hard limit** — pool entropy older than `STALENESS_HARD_LIMIT_SLOTS` (21 600 slots ≈ 2.25 hours) routes `request_randomness` to the queue path instead of the fast path. Matches the keeper idle gate threshold.
 - **`deliver_callback`** — requires a `caller: Signer` (permissionless crank but must sign).
+- **Key separation (V4.6)** — `rotate_randomness_authority` requires the `identity` cold key to sign. The hot key (`x1_randomness_authority`) can sign `commit_via_ee`, `reveal_via_ee`, `claim_validator_reward`. It cannot register, refresh, deregister, or rotate — those still require the identity key. Eligibility hash always uses `identity`, not the hot key, so selection is stable across rotations.
+- **NEVER reduce `MIN_EE_M_THRESHOLD`** — a stuck round is recoverable via `cancel_round`; biasable randomness is not. Do not lower thresholds to unstick a round.
 
 ## Architecture notes
 
@@ -229,7 +262,7 @@ Seeds: `[b"entropy-pool"]`
 
 > **Note:** `fee_distributed` moved from offset 32 → 40 when `ee_v4_round_id` was added. `refund_request` verifies the EE round's stored round_id matches `fee_escrow.ee_v4_round_id` to prevent cross-round refund attacks.
 
-### ValidatorRegistration (139 bytes — added Model 2)
+### ValidatorRegistration (171 bytes — V4.6 grew from 139)
 
 Seeds: `[b"val-reg", identity.key()]`
 
@@ -242,11 +275,14 @@ Seeds: `[b"val-reg", identity.key()]`
 | 112–119 | `registered_slot` (u64) |
 | 120–127 | `last_active_slot` (u64) — updated on successful commit |
 | 128–135 | `last_round_participated` (u64) |
-| 136    | `consecutive_misses` (u8) — 3+ triggers deactivation |
+| 136    | `consecutive_misses` (u8) — 5+ triggers deactivation (V4.6; was 3) |
 | 137    | `active` (bool) |
 | 138    | `bump` (u8) |
+| 139–170 | `x1_randomness_authority` (Pubkey) — hot key for commit/reveal; equals identity until `rotate_randomness_authority` is called. **Appended V4.6.** |
 
-Constants: `MIN_VALIDATOR_STAKE = 1000 XNT`, `VALIDATOR_MAX_INACTIVE_SLOTS = 500`, `MIN_COMMITTEE_SIZE = 2`
+> **Migration (V4.6):** Existing 139-byte accounts must be migrated immediately after upgrading the program. Run `PAYER_KEYPAIR=~/.config/solana/x1randomness-key.json node keeper/migrate-v46.js`. Until migrated, ALL instructions that deserialize `ValidatorRegistration` will fail. Any raw deserializer must check `data.len() >= 171` before reading offset 139.
+
+Constants: `MIN_VALIDATOR_STAKE = 1000 XNT`, `VALIDATOR_MAX_INACTIVE_SLOTS = 500`, `MIN_COMMITTEE_SIZE = 2`, `VALIDATOR_MAX_CONSECUTIVE_MISSES = 5`
 
 ### ValidatorReveal (82 bytes — added V3)
 
@@ -282,8 +318,8 @@ Full field layout (Borsh/Anchor, no padding):
 |--------|-------|-------|
 | 8–39 | `coordinator` (Pubkey) | validator who called init_ee_round |
 | 40–47 | `round_id` (u64) | |
-| 48 | `n_contributors` (u8) | currently 2 (= MIN_EE_M_THRESHOLD) |
-| 49 | `m_threshold` (u8) | currently 2 |
+| 48 | `n_contributors` (u8) | currently 7 (= EE_V4_N_CONTRIBUTORS) |
+| 49 | `m_threshold` (u8) | currently 5 (= EE_V4_M_THRESHOLD) |
 | 50–57 | `commit_deadline` (u64) | last slot for commits; init_slot + COMMIT_DEADLINE_SLOTS(200) |
 | 58–65 | `reveal_deadline` (u64) | last slot for reveals; commit_deadline + REVEAL_DEADLINE_SLOTS(400) |
 | 66–73 | `binding_slot` (u64) | slot for finalize_via_ee; passed by wrapper at init |
@@ -299,7 +335,7 @@ Full field layout (Borsh/Anchor, no padding):
 
 **Critical timing**: commit window ends at `commit_deadline` (off 50). Reveal window is `commit_deadline → reveal_deadline` (off 50–58). `binding_slot` (off 66) is ~75 slots after `reveal_deadline` and gates `finalize_via_ee`. The daemon must use `commit_deadline` (not `binding_slot`) to determine when to switch from commit to reveal phase.
 
-**Phase transition**: status transitions from CommitPhase→RevealPhase only when `commit_count == n_contributors`. With n=2, both registered validators must commit. If the reveal window expires without enough reveals, call `cancel_round` on the EE program directly (coordinator must sign + pass committed contributor wallets as remaining_accounts).
+**Phase transition**: status transitions from CommitPhase→RevealPhase only when `commit_count == n_contributors`. With n=7, all 7 selected validators must commit before reveals can begin. Finalization requires m=5 reveals. If the reveal window expires without enough reveals, call `cancel_round` on the EE program directly (coordinator must sign + pass committed contributor wallets as remaining_accounts).
 
 **cancel_round** (EE program direct call, not via wrapper):
 - Required when: status=CommitPhase (0) and round is stuck (reveal window passed, not enough commits)

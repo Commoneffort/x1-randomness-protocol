@@ -517,7 +517,7 @@ export default function DappsPage() {
                 ))}
               </div>
               <p className="mt-2 text-xs text-yellow-700 bg-yellow-50 border border-yellow-200 rounded p-2">
-                Fee tier is set by the protocol authority via <code className="font-mono">update_dapp_fee</code> after you register — you cannot set it yourself on-chain. Select your preference here and the authority will apply it. All dApps start on Standard (0.01 XNT) until confirmed.
+                Fee tier can be changed on-chain by calling <code className="font-mono">update_dapp_fee</code> — signed by the <strong>dApp authority</strong> (the wallet you register with). Higher fees mean larger validator rewards per round, incentivising liveness for your use case.
               </p>
             </div>
 

@@ -36,7 +36,9 @@ pub const MIN_VALIDATOR_STAKE: u64 = 1_000 * 1_000_000_000;
 pub const VALIDATOR_MAX_INACTIVE_SLOTS: u64 = 500;
 /// After this many consecutive rounds without revealing, the validator is
 /// automatically marked inactive by mark_validator_missed.
-pub const VALIDATOR_MAX_CONSECUTIVE_MISSES: u8 = 3;
+/// Raised from 3 → 5 for n=7: with 9 validators and 7 commit slots, 2 validators
+/// miss each round on average, so threshold 3 deactivated unlucky validators too aggressively.
+pub const VALIDATOR_MAX_CONSECUTIVE_MISSES: u8 = 5;
 /// Minimum number of distinct validators that must commit in any EE V4 round.
 pub const MIN_COMMITTEE_SIZE: u8 = 2;
 /// Maximum committee size per EE V4 round — up to 10 validators may commit.
@@ -51,6 +53,14 @@ pub const PREMIUM_REQUEST_FEE_LAMPORTS: u64 = 50_000_000; // 0.05 XNT
 /// while the validator set is small). Lower this as the set grows to cap committee
 /// size probabilistically — e.g. u64::MAX/10*7 targets ~70% eligibility.
 pub const COMMIT_SELECTION_THRESHOLD: u64 = u64::MAX;
+/// Number of commit slots per EE V4 round. With 9 registered validators and n=7,
+/// 7 validators fill the commit slots each round; the remaining 2 may miss but
+/// VALIDATOR_MAX_CONSECUTIVE_MISSES=5 gives enough buffer before deactivation.
+/// Raise n as the validator set grows beyond ~12 to maintain round diversity.
+pub const EE_V4_N_CONTRIBUTORS: u8 = 7;
+/// Reveal threshold — minimum reveals required to finalise the EE round.
+/// m=5 of n=7 means the round survives up to 2 non-reveals after the commit phase.
+pub const EE_V4_M_THRESHOLD: u8 = 5;
 
 // Verified on-chain layout constants (X1/Solana, confirmed against live accounts):
 // VoteState: 4-byte version prefix | node_pubkey[4..36] | authorized_withdrawer[36..68]
@@ -233,7 +243,7 @@ impl ValidatorReveal {
 /// Seeds: [b"val-reg", identity.key()]
 #[account]
 pub struct ValidatorRegistration {
-    /// The wallet key that signs commits/reveals.
+    /// The cold identity key — used to register, rotate authority, and prove vote ownership.
     pub identity: Pubkey,
     /// Their X1 vote account.
     pub vote_account: Pubkey,
@@ -251,11 +261,17 @@ pub struct ValidatorRegistration {
     /// False if deactivated due to misses or failed refresh.
     pub active: bool,
     pub bump: u8,
+    /// Hot key for daily operations (commit / reveal / init_ee_round / claim).
+    /// Set via rotate_randomness_authority (signed by identity).
+    /// Reset to identity via revoke_randomness_authority.
+    /// Appended in V4.6 — pre-existing accounts default to identity after migrate_validator_registration.
+    pub x1_randomness_authority: Pubkey,
 }
 impl ValidatorRegistration {
     // disc(8)+identity(32)+vote(32)+stake(32)+verified_stake(8)+registered_slot(8)
-    // +last_active_slot(8)+last_round_participated(8)+consecutive_misses(1)+active(1)+bump(1) = 139
-    pub const INIT_SPACE: usize = 8 + 32 + 32 + 32 + 8 + 8 + 8 + 8 + 1 + 1 + 1;
+    // +last_active_slot(8)+last_round_participated(8)+consecutive_misses(1)+active(1)+bump(1)
+    // +x1_randomness_authority(32) = 171
+    pub const INIT_SPACE: usize = 8 + 32 + 32 + 32 + 8 + 8 + 8 + 8 + 1 + 1 + 1 + 32;
 }
 
 #[account]
@@ -485,6 +501,35 @@ pub struct DeregisterValidator<'info> {
     pub identity: Signer<'info>,
 }
 
+/// Migrates a pre-V4.6 ValidatorRegistration (139 bytes) to 171 bytes.
+/// Permissionless — anyone may pay rent for any validator's account realloc.
+/// Sets x1_randomness_authority = identity (default; change via rotate_randomness_authority).
+#[derive(Accounts)]
+pub struct MigrateValidatorRegistration<'info> {
+    /// CHECK: Manually verified in handler — 139-byte ValidatorRegistration PDA.
+    #[account(mut, owner = crate::ID @ RandomnessError::Unauthorized)]
+    pub validator_registration: UncheckedAccount<'info>,
+    /// CHECK: The validator's identity key — used to derive and verify the PDA.
+    pub identity: AccountInfo<'info>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+/// Rotate the hot key allowed to sign commits/reveals on behalf of this validator.
+/// Must be signed by the validator's cold identity key.
+#[derive(Accounts)]
+pub struct RotateRandomnessAuthority<'info> {
+    #[account(
+        mut,
+        seeds = [b"val-reg", identity.key().as_ref()],
+        bump = validator_registration.bump,
+        constraint = validator_registration.identity == identity.key() @ RandomnessError::Unauthorized,
+    )]
+    pub validator_registration: Account<'info, ValidatorRegistration>,
+    pub identity: Signer<'info>,
+}
+
 /// Permissionless crank — anyone can refresh any validator's status.
 /// Updates verified_stake, last_active_slot, and active flag.
 #[derive(Accounts)]
@@ -548,11 +593,15 @@ pub struct InitEeRound<'info> {
     #[account(mut)]
     pub coordinator: Signer<'info>,
     /// Coordinator must be a registered, active validator.
+    /// Seeds use the stored identity; signer may be identity OR x1_randomness_authority.
     #[account(
-        seeds = [b"val-reg", coordinator.key().as_ref()],
+        seeds = [b"val-reg", coordinator_reg.identity.as_ref()],
         bump = coordinator_reg.bump,
         constraint = coordinator_reg.active @ RandomnessError::ValidatorInactive,
-        constraint = coordinator_reg.identity == coordinator.key() @ RandomnessError::Unauthorized,
+        constraint = (
+            coordinator_reg.identity == coordinator.key() ||
+            coordinator_reg.x1_randomness_authority == coordinator.key()
+        ) @ RandomnessError::Unauthorized,
     )]
     pub coordinator_reg: Account<'info, ValidatorRegistration>,
     /// CHECK: Coordinator's vote account — live activity checked in handler.
@@ -592,12 +641,17 @@ pub struct CommitViaEe<'info> {
     #[account(mut)]
     pub contributor: Signer<'info>,
     /// Contributor's registration — must be active.
+    /// Seeds use the stored identity (stable), not the signer (which may be the hot key).
+    /// Signer may be identity OR x1_randomness_authority — both are accepted.
     #[account(
         mut,
-        seeds = [b"val-reg", contributor.key().as_ref()],
+        seeds = [b"val-reg", validator_reg.identity.as_ref()],
         bump = validator_reg.bump,
         constraint = validator_reg.active @ RandomnessError::ValidatorInactive,
-        constraint = validator_reg.identity == contributor.key() @ RandomnessError::Unauthorized,
+        constraint = (
+            validator_reg.identity == contributor.key() ||
+            validator_reg.x1_randomness_authority == contributor.key()
+        ) @ RandomnessError::Unauthorized,
     )]
     pub validator_reg: Account<'info, ValidatorRegistration>,
     /// CHECK: Contributor's vote account — live activity verified in handler.
@@ -1327,6 +1381,7 @@ pub mod randomness_wrapper {
         reg.consecutive_misses = 0;
         reg.active = true;
         reg.bump = ctx.bumps.validator_registration;
+        reg.x1_randomness_authority = ctx.accounts.identity.key(); // defaults to identity
 
         msg!("Validator registered: {} stake={} XNT", ctx.accounts.identity.key(), staked_lamports / 1_000_000_000);
         Ok(())
@@ -1334,6 +1389,92 @@ pub mod randomness_wrapper {
 
     /// Remove your own validator registration and reclaim rent.
     pub fn deregister_validator(_ctx: Context<DeregisterValidator>) -> Result<()> {
+        Ok(())
+    }
+
+    /// Migrate a pre-V4.6 ValidatorRegistration (139 bytes) to 171 bytes.
+    /// Permissionless — anyone may pay for the realloc on behalf of any validator.
+    /// Sets x1_randomness_authority = identity. Call rotate_randomness_authority afterward
+    /// to set a different hot key.
+    pub fn migrate_validator_registration(ctx: Context<MigrateValidatorRegistration>) -> Result<()> {
+        let acct_info = ctx.accounts.validator_registration.to_account_info();
+
+        // Verify this is the canonical PDA for the given identity.
+        let (expected_pda, _) = Pubkey::find_program_address(
+            &[b"val-reg", ctx.accounts.identity.key().as_ref()],
+            ctx.program_id,
+        );
+        require!(acct_info.key() == expected_pda, RandomnessError::Unauthorized);
+
+        let current_len = acct_info.data_len();
+        if current_len >= ValidatorRegistration::INIT_SPACE {
+            return err!(RandomnessError::AlreadyMigrated);
+        }
+        // Sanity: must be the exact old size.
+        require!(current_len == 139, RandomnessError::Unauthorized);
+
+        // Verify stored identity matches the passed identity key.
+        {
+            let data = acct_info.try_borrow_data()?;
+            let stored_id = Pubkey::from(
+                <[u8; 32]>::try_from(&data[8..40])
+                    .map_err(|_| error!(RandomnessError::Unauthorized))?
+            );
+            require!(stored_id == ctx.accounts.identity.key(), RandomnessError::Unauthorized);
+        }
+
+        // Top up lamports if realloc requires more rent-exempt balance.
+        let rent = Rent::get()?;
+        let required = rent.minimum_balance(ValidatorRegistration::INIT_SPACE);
+        let current_lamports = acct_info.lamports();
+        if required > current_lamports {
+            let diff = required - current_lamports;
+            anchor_lang::solana_program::program::invoke(
+                &anchor_lang::solana_program::system_instruction::transfer(
+                    ctx.accounts.payer.key,
+                    acct_info.key,
+                    diff,
+                ),
+                &[
+                    ctx.accounts.payer.to_account_info(),
+                    acct_info.clone(),
+                    ctx.accounts.system_program.to_account_info(),
+                ],
+            )?;
+        }
+
+        // Realloc to 171 bytes; false = preserve existing data in first 139 bytes.
+        acct_info.realloc(ValidatorRegistration::INIT_SPACE, false)?;
+
+        // Write x1_randomness_authority = identity in the new bytes (offset 139..171).
+        {
+            let mut data = acct_info.try_borrow_mut_data()?;
+            let id_bytes = ctx.accounts.identity.key().to_bytes();
+            data[139..171].copy_from_slice(&id_bytes);
+        }
+
+        msg!("Migrated validator_registration for {}", ctx.accounts.identity.key());
+        Ok(())
+    }
+
+    /// Set a hot key allowed to sign commits/reveals on behalf of this validator.
+    /// Must be called by the cold identity key. The hot key never needs to touch
+    /// the identity wallet — it only needs to hold enough XNT for gas.
+    pub fn rotate_randomness_authority(
+        ctx: Context<RotateRandomnessAuthority>,
+        new_authority: Pubkey,
+    ) -> Result<()> {
+        ctx.accounts.validator_registration.x1_randomness_authority = new_authority;
+        msg!("Rotated x1_randomness_authority for {} to {}", ctx.accounts.identity.key(), new_authority);
+        Ok(())
+    }
+
+    /// Reset x1_randomness_authority back to identity (disables hot key separation).
+    /// Must be called by the cold identity key.
+    pub fn revoke_randomness_authority(ctx: Context<RotateRandomnessAuthority>) -> Result<()> {
+        let id = ctx.accounts.validator_registration.identity;
+        ctx.accounts.validator_registration.x1_randomness_authority = id;
+        msg!("Revoked x1_randomness_authority for {} — reset to identity", id);
         Ok(())
     }
 
@@ -1365,19 +1506,21 @@ pub mod randomness_wrapper {
             Err(_) => false,
         };
 
-        if stake_ok && vote_ok {
-            reg.active = true;
-            reg.consecutive_misses = 0;
-            reg.last_active_slot = current_slot;
-            if let Ok((_, lamports)) = parse_stake_account(&stake_data) {
-                reg.verified_stake = lamports;
-            }
-        } else {
-            reg.active = false;
-            msg!(
-                "Validator {} deactivated: stake_ok={} vote_ok={}",
-                reg.identity, stake_ok, vote_ok
-            );
+        // Return explicit errors on failure so callers know the exact reason.
+        // Previously returned Ok(()) on failure (silent deactivation) which caused
+        // daemons to retry refresh in a tight loop — they couldn't distinguish
+        // "reactivated" from "still inactive" without re-reading the account.
+        if !stake_ok {
+            return err!(RandomnessError::InsufficientValidatorStake);
+        }
+        if !vote_ok {
+            return err!(RandomnessError::ValidatorNotActivelyVoting);
+        }
+        reg.active = true;
+        reg.consecutive_misses = 0;
+        reg.last_active_slot = current_slot;
+        if let Ok((_, lamports)) = parse_stake_account(&stake_data) {
+            reg.verified_stake = lamports;
         }
         Ok(())
     }
@@ -1405,11 +1548,14 @@ pub mod randomness_wrapper {
         );
 
         // Derive the expected ValidatorReveal PDA on-chain — attacker cannot fake this.
+        // Use x1_randomness_authority as the signer seed: it equals identity for non-rotated
+        // validators (safe default after migration) and equals the hot key after rotation,
+        // matching what commit_via_ee/reveal_via_ee enforce as the contributor signer.
         let (expected_pda, _) = Pubkey::find_program_address(
             &[
                 b"validator-reveal",
                 ctx.accounts.ee_round.key().as_ref(),
-                ctx.accounts.validator_registration.identity.as_ref(),
+                ctx.accounts.validator_registration.x1_randomness_authority.as_ref(),
             ],
             ctx.program_id,
         );
@@ -1450,12 +1596,11 @@ pub mod randomness_wrapper {
             RandomnessError::Unauthorized
         );
 
-        // n = m so the round fills as soon as m validators commit, enabling RevealPhase.
-        // MAX_COMMITTEE_SIZE (10) requires all 10 slots filled before RevealPhase — with
-        // fewer than 10 active validators the round would never progress. Using n = m
-        // means the minimum quorum also fills the commit slots.
-        let n_contributors: u8 = MIN_EE_M_THRESHOLD;
-        let m_threshold:    u8 = MIN_EE_M_THRESHOLD;
+        // n=7 commit slots, m=5 reveal threshold. With 9 registered validators,
+        // 7 fill each round and up to 2 non-reveals still allow finalization.
+        // Constants are tuned for the current validator set size — see EE_V4_N_CONTRIBUTORS.
+        let n_contributors: u8 = EE_V4_N_CONTRIBUTORS;
+        let m_threshold:    u8 = EE_V4_M_THRESHOLD;
         let current_slot       = Clock::get()?.slot;
         let binding_slot: u64  = current_slot.saturating_add(EE_V4_MIN_BINDING_SLOTS);
         {
@@ -1467,7 +1612,8 @@ pub mod randomness_wrapper {
                 <[u8; 32]>::try_from(&vote_data[VOTE_NODE_PUBKEY_OFFSET..VOTE_NODE_PUBKEY_OFFSET + 32])
                     .map_err(|_| error!(RandomnessError::InvalidVoteAccount))?
             );
-            require!(node_pubkey == ctx.accounts.coordinator.key(), RandomnessError::Unauthorized);
+            // Vote account's node_pubkey must match the registered identity (not the hot key signer).
+            require!(node_pubkey == ctx.accounts.coordinator_reg.identity, RandomnessError::Unauthorized);
             let (voter, lamports) = parse_stake_account(&stake_data)?;
             require!(voter == ctx.accounts.coordinator_vote.key(), RandomnessError::StakeNotDelegatedToVote);
             require!(lamports >= MIN_VALIDATOR_STAKE, RandomnessError::InsufficientValidatorStake);
@@ -1563,13 +1709,13 @@ pub mod randomness_wrapper {
                 RandomnessError::InvalidStakeAccount
             );
 
-            // Verify contributor owns this vote account.
+            // Verify the vote account belongs to the registered identity (not the hot key signer).
             require!(vote_data.len() >= VOTE_NODE_PUBKEY_OFFSET + 32, RandomnessError::InvalidVoteAccount);
             let node_pubkey = Pubkey::from(
                 <[u8; 32]>::try_from(&vote_data[VOTE_NODE_PUBKEY_OFFSET..VOTE_NODE_PUBKEY_OFFSET + 32])
                     .map_err(|_| error!(RandomnessError::InvalidVoteAccount))?
             );
-            require!(node_pubkey == ctx.accounts.contributor.key(), RandomnessError::Unauthorized);
+            require!(node_pubkey == ctx.accounts.validator_reg.identity, RandomnessError::Unauthorized);
 
             let (voter, lamports) = parse_stake_account(&stake_data)?;
             require!(voter == ctx.accounts.vote_account.key(), RandomnessError::StakeNotDelegatedToVote);
@@ -1601,7 +1747,9 @@ pub mod randomness_wrapper {
 
             let mut val_input = Vec::with_capacity(64);
             val_input.extend_from_slice(&round_seed);
-            val_input.extend_from_slice(ctx.accounts.contributor.key().as_ref());
+            // Use the stable identity key (not the potentially-rotated hot key) so that
+            // eligibility is consistent across key rotations and matches the JS daemon check.
+            val_input.extend_from_slice(ctx.accounts.validator_reg.identity.as_ref());
             let val_hash = hash(&val_input).to_bytes();
 
             let selector = u64::from_le_bytes(val_hash[..8].try_into().unwrap());

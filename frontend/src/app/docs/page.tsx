@@ -104,7 +104,7 @@ export default function DocsPage() {
               },
               {
                 title: "EntropyEngine V4 (external program, CPI)",
-                desc: "Runs the commit/reveal cycle. Validators (n=2 currently; grows with validator set) stake 0.01 XNT each, commit a hashed secret before commit_deadline (~200 slots), then reveal before reveal_deadline (~600 slots). After the binding slot (~675 slots / ~4.2 min), finalize_via_ee produces entropy_output.",
+                desc: "Runs the commit/reveal cycle. n=7 validators stake 0.01 XNT each, commit a hashed secret before commit_deadline (~200 slots), then reveal before reveal_deadline (~600 slots). m=5 reveals suffice to finalize. After the binding slot (~675 slots / ~4.2 min), finalize_via_ee produces entropy_output.",
               },
             ].map(({ title, desc }) => (
               <div key={title} className="p-3 bg-surface-elevated rounded-lg border border-border">
@@ -125,7 +125,7 @@ export default function DocsPage() {
           <p>Each protocol round maps to one EE V4 commit/reveal cycle:</p>
           <div className="space-y-2 mt-2">
             {[
-              { n: "1", color: "bg-blue-50 border-blue-200", label: "commit_via_ee", desc: "Validators stake 0.01 XNT and submit a hashed secret before commit_deadline (~200 slots after round init). Currently n=2 validators per round (grows with validator set; EE V4 max is 10)." },
+              { n: "1", color: "bg-blue-50 border-blue-200", label: "commit_via_ee", desc: "Validators stake 0.01 XNT and submit a hashed secret before commit_deadline (~200 slots after round init). n=7 validators are selected per round; all 7 must commit before reveals begin." },
               { n: "2", color: "bg-yellow-50 border-yellow-200", label: "reveal_via_ee", desc: "After commit_deadline (~200 slots) and before reveal_deadline (~600 slots), validators reveal their secret. This creates a ValidatorReveal PDA recording participation. The 0.01 XNT stake is returned on valid reveal." },
               { n: "3", color: "bg-green-50 border-green-200", label: "finalize_via_ee + aggregate_from_ee", desc: "Any signer calls finalize_via_ee to mark the EE V4 round done, then aggregate_from_ee to mix entropy into the pool: SHA256(ee_output ‖ slot_hash). Both are permissionless cranks. EntropyPool is now warm." },
               { n: "4", color: "bg-purple-50 border-purple-200", label: "distribute_fees", desc: "Permissionless crank. Pays 5% to the crank caller, records original_fees on FeeEscrow, marks fee_distributed = true. Validators can now claim their 95% share." },
@@ -171,7 +171,10 @@ export default function DocsPage() {
                   ["register_dapp", "Register dApp PDA for callbacks", "Any wallet"],
                   ["unregister_dapp", "Close dApp PDA, reclaim rent", "dApp authority"],
                   ["set_fee", "Update protocol-wide request fee", "Authority"],
-                  ["update_dapp_fee", "Set per-dApp fee override (0 = use protocol default)", "Protocol authority"],
+                  ["update_dapp_fee", "Set per-dApp fee override (0 = use protocol default)", "dApp authority"],
+                  ["migrate_validator_registration", "V4.6 one-time migration: grow ValidatorRegistration 139→171 bytes and set x1_randomness_authority = identity. Permissionless.", "Anyone"],
+                  ["rotate_randomness_authority", "Set a new hot key for commit/reveal/claim — signed by identity (cold key). V4.6+", "Validator (identity)"],
+                  ["revoke_randomness_authority", "Reset x1_randomness_authority back to identity. V4.6+", "Validator (identity)"],
                   ["refund_request", "Refund fee if EE V4 round was cancelled (status = 3)", "Requester"],
                   ["close_request", "Close fulfilled RequestState PDA and reclaim rent", "Requester"],
                   ["verify_entropy", "Verify a fulfilled RequestState's output matches receipt", "Anyone"],
@@ -277,18 +280,19 @@ export default function DocsPage() {
               },
               {
                 name: "ValidatorRegistration",
-                size: "139 bytes",
+                size: "171 bytes (139 bytes before V4.6 migration)",
                 fields: [
-                  ["8–39", "identity", "Pubkey (validator identity key)"],
+                  ["8–39", "identity", "Pubkey (validator identity cold key)"],
                   ["40–71", "vote_account", "Pubkey"],
                   ["72–103", "stake_account", "Pubkey"],
                   ["104–111", "verified_stake", "u64 (lamports) — re-verified on each refresh"],
                   ["112–119", "registered_slot", "u64"],
                   ["120–127", "last_active_slot", "u64 — updated on successful commit"],
                   ["128–135", "last_round_participated", "u64"],
-                  ["136", "consecutive_misses", "u8 — 3+ triggers deactivation"],
+                  ["136", "consecutive_misses", "u8 — 5+ triggers deactivation (V4.6; was 3)"],
                   ["137", "active", "bool"],
                   ["138", "bump", "u8"],
+                  ["139–170", "x1_randomness_authority", "Pubkey — hot key for commit/reveal/claim; equals identity until rotate_randomness_authority is called. Appended V4.6; check data.length >= 171 before reading."],
                 ],
               },
               {
@@ -471,8 +475,8 @@ const ix = new TransactionInstruction({
           </p>
           <div className="space-y-2 mt-2">
             {[
-              { n: "1", title: "Start the next round", body: `Call advance_round + create_fee_escrow (permissionless, any signer), then init_ee_round(ee_round_id = current+1). n, m, and binding_slot are protocol constants — not caller args. First validator to land init_ee_round opens the commit window.` },
-              { n: "2", title: "Commit", body: `Call commit_via_ee(SHA256(secret || nonce || pubkey)) before commit_deadline (~200 slots). Stake ${EE_V4_STAKE_LAMPORTS / 1e9} XNT. Currently n=2 validators per round (EE V4 max is 10).` },
+              { n: "1", title: "Start the next round", body: `Call advance_round + create_fee_escrow (permissionless, any signer), then init_ee_round(ee_round_id = current+1). n=7, m=5, and binding_slot are protocol constants — not caller args. First validator to land init_ee_round opens the commit window.` },
+              { n: "2", title: "Commit", body: `Call commit_via_ee(SHA256(secret || nonce || pubkey)) before commit_deadline (~200 slots). Stake ${EE_V4_STAKE_LAMPORTS / 1e9} XNT. n=7 validators per round; all 7 must commit before reveals begin. m=5 reveals suffice to finalize.` },
               { n: "3", title: "Reveal", body: "After commit_deadline (~200 slots) and before reveal_deadline (~600 slots / ~3.75 min), call reveal_via_ee(secret, nonce). Stake is returned. Creates a ValidatorReveal PDA for fee claiming." },
               { n: "4", title: "Finalize + aggregate", body: "Call finalize_via_ee (permissionless), then aggregate_from_ee. Pool is now warm — queued requests are fulfilled." },
               { n: "5", title: "Claim reward", body: "Call distribute_fees (permissionless — crank runner earns 5%), then claim_validator_reward. Receive original_fees × 95% ÷ reveal_count." },
@@ -504,8 +508,8 @@ const ix = new TransactionInstruction({
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
             {[
-              { k: "Validators per round", v: "n=2 (wrapper config; EE V4 hardcoded max is 10)" },
-              { k: "Minimum reveal threshold", v: "m=2 (enforced by wrapper, prevents solo runs)" },
+              { k: "Validators per round", v: "n=7 (all 7 must commit; grows probabilistically with validator set)" },
+              { k: "Minimum reveal threshold", v: "m=5 (5 of 7 reveals suffice to finalize; prevents single-validator entropy)" },
               { k: "Commit stake", v: `${EE_V4_STAKE_LAMPORTS / 1e9} XNT (returned on valid reveal)` },
               { k: "Binding slot minimum", v: "675 slots (~4.2 min after round init)" },
               { k: "Slash on non-reveal", v: `${EE_V4_STAKE_LAMPORTS / 1e9} XNT forfeited to EE V4 slash pool` },
@@ -579,6 +583,10 @@ const ix = new TransactionInstruction({
                 title: "Idle gate — no wasted validator resources",
                 desc: `Validators and the crank skip opening new EE rounds when the pool is warm (< ${STALENESS_HARD_LIMIT_SLOTS.toLocaleString()} slots stale) and there are no unfulfilled RequestState accounts. A round starts automatically when the pool goes stale or a queued request appears.`,
               },
+              {
+                title: "Key separation (V4.6) — hot key for daily ops, cold key stays offline",
+                desc: "Each ValidatorRegistration now holds an x1_randomness_authority hot key (offset 139). The hot key can sign commit/reveal/claim; it cannot register, refresh, deregister, or rotate — those still require the identity cold key. Eligibility hash always uses identity (not the hot key) so selection probability is stable across rotations. Rotate via: VALIDATOR_KEYPAIR=identity.json node validator-daemon.js --rotate-authority <hotkey_pubkey>",
+              },
             ].map(({ title, desc }) => (
               <div key={title} className="flex gap-3 p-3 bg-surface-elevated rounded-lg border border-border">
                 <ShieldCheckIcon className="h-5 w-5 text-green-600 shrink-0 mt-0.5" />
@@ -609,7 +617,7 @@ const ix = new TransactionInstruction({
               },
               {
                 q: "How many validators participate per round?",
-                a: "The wrapper sets n_contributors=2 and m_threshold=2 when opening each EE V4 round, meaning exactly 2 validators commit and reveal per round. This matches the current validator set size. EntropyEngine V4 is hardcoded to accept at most 10 contributors per round total. As the validator set grows, n will be increased to match.",
+                a: "The wrapper sets n_contributors=7 and m_threshold=5 when opening each EE V4 round (V4.6). All 7 selected validators must commit before reveals begin; 5 valid reveals suffice to finalize. Eligibility is derived on-chain from pool entropy — no external actor controls who is in the committee.",
               },
               {
                 q: "How do I earn rewards as a validator?",
@@ -617,7 +625,7 @@ const ix = new TransactionInstruction({
               },
               {
                 q: "What does fee_override do for dApps?",
-                a: "The protocol authority (not the dApp) can set a custom per-dApp fee via update_dapp_fee after registration. When a request comes in from that dApp, the override fee is charged instead of the protocol default. 0 means use the protocol default. Higher fees mean larger validator rewards per round, incentivising liveness.",
+                a: "The dApp authority (the wallet that registered the dApp) can set a custom fee via update_dapp_fee. When a request comes in from that dApp, the override fee is charged instead of the protocol default. 0 means use the protocol default. Higher fees mean larger validator rewards per round, incentivising liveness for premium use cases.",
               },
               {
                 q: "How does verify_entropy work?",

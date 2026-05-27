@@ -8,9 +8,13 @@ frontend/out/
 *.d
 Cargo.lock
 *.env
+*.env.*
 *.local
 /tmp/
 .DS_Store
+# compiled binaries
+a.out
+*.out
 # build artifacts
 frontend/tsconfig.tsbuildinfo
 # one-off operational scripts (round-specific, not for general use)
@@ -18,3 +22,9 @@ keeper/cancel-ee-round-*.js
 !keeper/cancel-ee-round.js
 # per-round secrets (stored outside repo at ~/.config/x1randomness/)
 vd-secrets-*.json
+# keypair files — never commit private keys
+identity.json
+hotkey.json
+hot-key.json
+stake*.json
+vote*.json
