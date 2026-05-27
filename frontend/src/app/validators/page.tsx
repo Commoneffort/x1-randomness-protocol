@@ -4,7 +4,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { useX1Wallet, useConnection } from "@/lib/X1WalletContext";
 import { PublicKey, Transaction, TransactionInstruction, SystemProgram } from "@solana/web3.js";
 import { ProtocolClient, ValidatorReveal, FeeEscrow, ValidatorRegistration } from "@/lib/protocol";
-import { PROGRAM_ID, EE_V4_STAKE_LAMPORTS, FEE_VALIDATORS_PCT, DISC, ACCT_DISC, MIN_VALIDATOR_STAKE_XNT, VALIDATOR_MAX_INACTIVE_SLOTS, MIN_COMMITTEE_SIZE, VALIDATOR_MAX_CONSECUTIVE_MISSES } from "@/lib/constants";
+import { PROGRAM_ID, EE_V4_STAKE_LAMPORTS, FEE_VALIDATORS_PCT, DISC, ACCT_DISC, MIN_VALIDATOR_STAKE_XNT, VALIDATOR_MAX_INACTIVE_SLOTS, MIN_COMMITTEE_SIZE, VALIDATOR_MAX_CONSECUTIVE_MISSES, EE_V4_N_CONTRIBUTORS, EE_V4_M_THRESHOLD } from "@/lib/constants";
 import { findFeeEscrowPda, findValRegPda } from "@/lib/pdas";
 
 export default function ValidatorsPage() {
@@ -207,7 +207,7 @@ export default function ValidatorsPage() {
             { k: "Registered", v: allValidators.length.toString() },
             { k: "Active", v: allValidators.filter(v => v.active).length.toString() },
             { k: "Min stake", v: `${MIN_VALIDATOR_STAKE_XNT.toLocaleString()} XNT` },
-            { k: "Committee size", v: `≥ ${MIN_COMMITTEE_SIZE} per round` },
+            { k: "Committee size", v: `n=${EE_V4_N_CONTRIBUTORS} commit, m=${EE_V4_M_THRESHOLD} reveal to finalize` },
           ].map(({ k, v }) => (
             <div key={k} className="p-3 bg-surface-elevated rounded-lg">
               <p className="text-xs text-text-muted">{k}</p>
@@ -303,7 +303,7 @@ export default function ValidatorsPage() {
                 <p>Vote:  {myReg.voteAccount.slice(0, 20)}…</p>
                 <p>Stake: {myReg.stakeAccount.slice(0, 20)}…</p>
                 <p>Verified stake: {(myReg.verifiedStake / 1e9).toLocaleString()} XNT</p>
-                <p>Status: {myReg.active ? "✓ active" : "✗ inactive — call refresh_validator_status"}</p>
+                <p>Status: {myReg.active ? "✓ active" : "✗ inactive — run: VALIDATOR_KEYPAIR=~/.config/solana/identity.json node keeper/validator-daemon.js --refresh (on your validator server)"}</p>
               </div>
             </div>
             {regSuccess && <div className="p-3 bg-green-50 rounded-lg text-green-700 text-sm">{regSuccess}</div>}
@@ -357,7 +357,7 @@ export default function ValidatorsPage() {
         <div className="space-y-3">
           {[
             { step: "1", title: "Register", desc: `Call register_validator with your vote account and a stake account delegated to it. The program verifies ≥${MIN_VALIDATOR_STAKE_XNT.toLocaleString()} XNT stake and that you voted within ${VALIDATOR_MAX_INACTIVE_SLOTS} slots. No whitelist — fully permissionless.` },
-            { step: "2", title: "Run validator-daemon.js", desc: `Each validator runs their own daemon independently. It monitors the chain, checks your on-chain entropy-based eligibility each round, and calls commit_via_ee (SHA256(secret ‖ nonce ‖ pubkey), stakes ${EE_V4_STAKE_LAMPORTS / 1e9} XNT, returned on reveal). At least ${MIN_COMMITTEE_SIZE} validators must commit each round.` },
+            { step: "2", title: "Run validator-daemon.js", desc: `Each validator runs their own daemon independently. It monitors the chain, checks your on-chain entropy-based eligibility each round, and calls commit_via_ee (SHA256(secret ‖ nonce ‖ pubkey), stakes ${EE_V4_STAKE_LAMPORTS / 1e9} XNT, returned on reveal). n=${EE_V4_N_CONTRIBUTORS} validators are selected to commit each round; m=${EE_V4_M_THRESHOLD} reveals suffice to finalize (up to ${EE_V4_N_CONTRIBUTORS - EE_V4_M_THRESHOLD} non-reveals tolerated).` },
             { step: "3", title: "Reveal before reveal_deadline", desc: "After commit_deadline (~200 slots / ~75s), submit your preimage before reveal_deadline (~600 slots / ~3.75 min from round init). Stake returns immediately. A ValidatorReveal PDA is written recording your contribution. Miss the deadline and you forfeit the stake." },
             { step: "4", title: "Claim reward", desc: `After finalize + distribute_fees (crank earns 5%), call claim_validator_reward once per round. Pays: round_fees × ${FEE_VALIDATORS_PCT}% ÷ reveal_count. Example: 3 requests × 0.01 XNT × 95% ÷ 3 revealers = 0.0095 XNT each.` },
           ].map(({ step, title, desc }) => (
@@ -381,7 +381,7 @@ export default function ValidatorsPage() {
             { k: "Max vote staleness", v: `${VALIDATOR_MAX_INACTIVE_SLOTS} slots (~3 min) — checked at every commit` },
             { k: "Consecutive miss limit", v: `${VALIDATOR_MAX_CONSECUTIVE_MISSES} misses → validator marked inactive, excluded from rounds` },
             { k: "Kick mechanism", v: "Any wallet calls mark_validator_missed; slashes are automatic on finalize" },
-            { k: "Recover from inactive", v: "Call refresh_validator_status after going back online" },
+            { k: "Recover from inactive", v: "Run --refresh on your validator server: VALIDATOR_KEYPAIR=~/.config/solana/identity.json node keeper/validator-daemon.js --refresh (requires cold identity key)" },
             { k: "Committee size", v: `Minimum ${MIN_COMMITTEE_SIZE} validators per round — single-validator entropy is impossible` },
           ].map(({ k, v }) => (
             <div key={k} className="p-3 bg-surface-elevated rounded-lg">
