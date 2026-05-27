@@ -129,7 +129,11 @@ CRANK_KEYPAIR=~/.config/solana/identity.json nohup node run-round.js --loop > /t
 # Validator daemon (one per validator, uses identity key):
 VALIDATOR_KEYPAIR=~/.config/solana/identity.json nohup node validator-daemon.js --loop > /tmp/validator-daemon.log 2>&1 &
 
-# Validator daemon with hot key (V4.6+, after rotate_randomness_authority):
+# Validator daemon with hot key — separate randomness server (recommended, V4.6+):
+# Run this on a dedicated machine; identity.json stays on the validator server only.
+VALIDATOR_IDENTITY_PUBKEY=<identity_pubkey_base58> X1_RANDOMNESS_KEYPAIR=~/.config/solana/x1randomness-hotkey.json nohup node validator-daemon.js --loop > /tmp/validator-daemon.log 2>&1 &
+
+# Full mode (identity + hot key on same machine, less recommended):
 VALIDATOR_KEYPAIR=~/.config/solana/identity.json X1_RANDOMNESS_KEYPAIR=~/.config/solana/hotkey.json nohup node validator-daemon.js --loop > /tmp/validator-daemon.log 2>&1 &
 
 # First-time validator registration (no npm needed — uses only Node.js built-ins):
@@ -147,14 +151,18 @@ node keeper/register.js --deregister --keypair ~/.config/solana/identity.json
 # Post-V4.6 upgrade: run migration immediately after deploying the new .so
 PAYER_KEYPAIR=~/.config/solana/x1randomness-key.json node keeper/migrate-v46.js
 
-# Rotate to a hot key (after migration):
+# Rotate to a hot key (after migration, on validator server):
 solana-keygen new --no-bip39-passphrase -o ~/.config/solana/x1randomness-hotkey.json
 VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --rotate-authority $(solana-keygen pubkey ~/.config/solana/x1randomness-hotkey.json)
+
+# Reactivate an inactive validator (run on validator server where identity.json lives):
+VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --refresh
 ```
 
 **Validator daemon env vars:**
-- `VALIDATOR_KEYPAIR` — required; path to identity keypair (cold key, used to sign `init_ee_round`, `rotate_randomness_authority`, `register_validator`)
-- `X1_RANDOMNESS_KEYPAIR` — optional (V4.6+); path to hot keypair for commit/reveal/claim. If unset, identity key is used for all operations.
+- `VALIDATOR_KEYPAIR` — path to identity keypair (cold key). Required in full mode; omit in hot-key-only mode. Used for `init_ee_round`, `refresh_validator_status`, `rotate_randomness_authority`, `register_validator`, `deregister_validator`.
+- `VALIDATOR_IDENTITY_PUBKEY` — base58 public key of the validator identity. Use instead of `VALIDATOR_KEYPAIR` in hot-key-only mode (identity secret key stays on the validator server). Requires `X1_RANDOMNESS_KEYPAIR`.
+- `X1_RANDOMNESS_KEYPAIR` — optional (V4.6+); path to hot keypair for commit/reveal/claim. If unset, identity key is used for all operations. Required in hot-key-only mode.
 - `POLL_MS` — optional; poll interval in milliseconds (default 15000). Stagger multiple validators to reduce `init_ee_round` races: `POLL_MS=13000` on one, `POLL_MS=17000` on another.
 - `RPC_URL` — optional; RPC endpoint (default `https://rpc.mainnet.x1.xyz`)
 

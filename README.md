@@ -463,23 +463,50 @@ cd keeper && npm install
 VALIDATOR_KEYPAIR=/path/to/identity.json node validator-daemon.js --loop
 ```
 
-### Step 3 — Set up a hot key (recommended)
+### Step 3 — Set up a separate randomness server (recommended)
 
-Keeps the identity (cold) key offline after a one-time rotation. Hot key signs all daily commit/reveal/claim operations.
+The daemon should run on a dedicated server that holds **only the hot key** — the identity key never leaves the validator. This is the security-correct architecture.
+
+**On your validator server (one-time):**
 
 ```bash
 # Generate the hot key
 solana-keygen new --no-bip39-passphrase -o ~/.config/solana/x1randomness-hotkey.json
 
-# Rotate — identity key signs this once, then stays offline
+# Fund the hot key (~0.1 XNT float for commit stakes)
+solana transfer $(solana-keygen pubkey ~/.config/solana/x1randomness-hotkey.json) 0.1 \
+  --url https://rpc.mainnet.x1.xyz
+
+# Rotate — identity key signs once, then stays offline forever
 VALIDATOR_KEYPAIR=/path/to/identity.json \
   node validator-daemon.js --rotate-authority \
   $(solana-keygen pubkey ~/.config/solana/x1randomness-hotkey.json)
 
-# Run with hot key
-VALIDATOR_KEYPAIR=/path/to/identity.json \
+# Copy ONLY the hot key to the randomness server (never copy identity.json!)
+scp ~/.config/solana/x1randomness-hotkey.json user@randomness-server:~/.config/solana/
+```
+
+**On the randomness server:**
+
+```bash
+# Install Node.js 22
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+source ~/.bashrc && nvm install 22
+
+# Clone repo and install deps
+git clone https://github.com/Commoneffort/x1-randomness-protocol
+cd x1-randomness-protocol/keeper && npm install
+
+# Run — identity pubkey only (no secret key on this machine)
+VALIDATOR_IDENTITY_PUBKEY=<your_identity_pubkey_base58> \
   X1_RANDOMNESS_KEYPAIR=~/.config/solana/x1randomness-hotkey.json \
   node validator-daemon.js --loop
+```
+
+**If your validator goes inactive** (5+ missed rounds), reactivate from the validator server:
+
+```bash
+VALIDATOR_KEYPAIR=/path/to/identity.json node keeper/validator-daemon.js --refresh
 ```
 
 ### Permissionless crank
@@ -660,10 +687,12 @@ If an EE V4 round is cancelled (status byte 140 == 3), `refund_request` lets req
 - **New instructions** — `migrate_validator_registration` (permissionless, 139→171 bytes), `rotate_randomness_authority` (identity-signed), `revoke_randomness_authority` (identity-signed, resets to identity).
 
 **Keeper (`validator-daemon.js`):**
+- **Hot-key-only mode** — `VALIDATOR_IDENTITY_PUBKEY=<base58>` + `X1_RANDOMNESS_KEYPAIR=<hotkey.json>` runs the daemon without the identity secret key on the machine. Supports commit/reveal/claim. Skips `init_ee_round` and `refresh_validator_status` (identity-only operations).
 - `X1_RANDOMNESS_KEYPAIR` env var — hot key path for commit/reveal/claim; identity key used when unset.
 - `--rotate-authority <pubkey>` flag — sends `rotate_randomness_authority` and exits.
 - `--deregister` flag — sends `deregister_validator` and exits.
-- Reward sweep scans both identity and hot key for unclaimed `ValidatorReveal` PDAs.
+- `--refresh` flag — calls `refresh_validator_status` to reactivate an inactive validator; requires identity key.
+- Reward sweep: in full mode, scans both identity and hot key; in hot-key-only mode, scans hot key only.
 - Commitment hash uses hot key pubkey: `SHA256(secret ‖ nonce ‖ hotKey.publicKey)`.
 - Refresh errors produce specific log messages for `StakeDeactivating` / `InvalidStakeAccount` / `InsufficientValidatorStake` / `ValidatorNotActivelyVoting`.
 

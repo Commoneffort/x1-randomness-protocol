@@ -41,7 +41,8 @@
 **Total V4.2 audit:** 15 additional issues found, 15 fixed.  
 **Total V4.3 audit:** 17 additional issues found, 17 fixed.  
 **Total V4.6 audit:** 33 additional issues found, 33 fixed (13 program/daemon/tests + 20 frontend/docs).  
-**Piotr's external audit (2026-05-27) — 2 issues, 2 fixed:** StakeDeactivating error propagation (program + daemon) fixed in post-V4.6 patch; stale daemon comment corrected.
+**Piotr's external audit (2026-05-27) — 2 issues, 2 fixed:** StakeDeactivating error propagation (program + daemon) fixed in post-V4.6 patch; stale daemon comment corrected.  
+**Post-V4.6 patch audit (2026-05-27) — 16 issues, 16 fixed:** Hot-key-only daemon mode completion (6 daemon issues), docs/fee economics stale "protocol authority" text, eligibility hash formula in security section, validator credential binding description, FAQ update, README separate-server setup, CLAUDE.md env vars, AUDIT.md stale references.
 
 ---
 
@@ -83,10 +84,10 @@
 
 ### ✅ PASS — No issues
 
-- Takes `VALIDATOR_KEYPAIR` env var — holds only the validator's own identity key.
+- Takes `VALIDATOR_KEYPAIR` (full mode) or `VALIDATOR_IDENTITY_PUBKEY` (hot-key-only mode) — holds only the validator's own key(s).
 - Mirrors on-chain eligibility check before submitting `commit_via_ee`.
 - `ixCommit` includes `entropy_pool` PDA in account list (matches `CommitViaEe` context).
-- Secrets persisted to `/tmp/vd-secrets-<prefix>.json` before commit — survives restart.
+- Secrets persisted to `~/.config/x1randomness/vd-secrets-<pubkeyPrefix>.json` (mode `0o600`) before commit — survives restart. **Note: V4.2 audit moved this from `/tmp/` to this path.**
 - Calls `claim_validator_reward` after `distribute_fees` runs.
 
 ### ⚠️ Non-critical: `validator-daemon.ts` still present
@@ -294,7 +295,7 @@ Round lifecycle legend, fee display, and status badges are all accurate.
 
 | ID | Severity | File | Issue | Fix |
 |----|----------|------|-------|-----|
-| H-3 | High | `validator-daemon.js` `sweepUnclaimedRewards` | After key rotation, new `ValidatorReveal` PDAs have `contributor == hotKey.publicKey`. The sweep scanned only by `identity.publicKey` — post-rotation rewards would never be claimed. | Sweep now builds scan pairs `[{identity, signer: identity}, {hotKey, signer: hotKey}]` (deduplicated when equal). Claims pre-rotation rewards with identity, post-rotation rewards with hot key. |
+| H-3 | High | `validator-daemon.js` `sweepUnclaimedRewards` | After key rotation, new `ValidatorReveal` PDAs have `contributor == hotKey.publicKey`. The sweep scanned only by `identity.publicKey` — post-rotation rewards would never be claimed. | In full mode: scans identity (pre-rotation) and, if different, hot key (post-rotation). In hot-key-only mode: scans hot key only (identity secret not available to sign claims). |
 | H-4 | High | `validator-daemon.js` commit/reveal | Commitment hash was `SHA256(secret ‖ nonce ‖ identity.publicKey)`. After rotation, the signer is `hotKey` but hash still used `identity` — reveal would fail (hash mismatch on-chain). | All three commitment hash sites updated to use `hotKey.publicKey`. VR PDA derivation and contributor account key updated to match. |
 | M-5 | Medium | `validator-daemon.js` WrongPhase check | WrongPhase → re-check contributor list compared slot against `identity.publicKey`. After rotation, commits land under `hotKey.publicKey` — check would always return `isContributor = false`, causing skip when we had actually committed. | Changed comparison to `hotKey.publicKey`. |
 | L-1 | Low | `validator-daemon.js` | No `--deregister` flag. Operators could not cleanly remove their registration without writing custom scripts. | Added `--deregister` flag calling `deregister_validator` instruction (closes account, returns rent to identity). |
@@ -359,6 +360,65 @@ Round lifecycle legend, fee display, and status badges are all accurate.
 | R-10 | Medium | Validator daemon table: single-key description | Updated to reflect V4.6 hot key support |
 | R-11 | Medium | Running a Validator: no V4.6 commands | Added `X1_RANDOMNESS_KEYPAIR`, `--rotate-authority`, `--deregister`, `CRANK_KEYPAIR` |
 | R-12 | Medium | Missing V4.6 changelog section | Added complete V4.6 changelog with program changes, daemon changes, migration script, post-deploy sequence |
+
+---
+
+## Post-V4.6 Patch Audit (2026-05-27) — Hot-key-only daemon mode
+
+**Scope:** `keeper/validator-daemon.js` hot-key-only mode completion + `frontend/src/app/validators/page.tsx` + `README.md` + `CLAUDE.md`
+
+### Summary
+
+| Area | Issues Found | Issues Fixed | Status |
+|------|-------------|-------------|--------|
+| Validator daemon — hot-key-only mode | 4 | 4 | ✅ FIXED |
+| Frontend docs (`docs/page.tsx`) | 4 | 4 | ✅ FIXED |
+| README.md | 2 | 2 | ✅ FIXED |
+| CLAUDE.md | 4 | 4 | ✅ FIXED |
+| AUDIT.md stale references | 2 | 2 | ✅ FIXED |
+
+### Validator Daemon — hot-key-only mode findings
+
+| ID | Severity | Issue | Fix |
+|----|----------|-------|-----|
+| H-1 | High | `ixCommit` used `identity.publicKey` for `valRegPda` derivation. In hot-key-only mode `identity` is `null` — daemon would crash on any commit attempt. | Changed to `identityPubkey` throughout `ixCommit`, `ixRefreshValidatorStatus`, `ixCancelEeRound`. |
+| H-2 | High | `sweepUnclaimedRewards` (V4.6 H-3 fix) used `identity.publicKey` directly — null crash in hot-key-only mode. | Guarded: full mode scans identity + hot key; hot-key-only mode scans hot key only. |
+| H-3 | High | Next-round `init_ee_round` block (line ~700) had no `hotKeyOnlyMode` guard. Would crash with null identity when trying to open the next EE round. | Added `hotKeyOnlyMode` guard: logs "waiting for another validator" and returns. `send()` calls explicitly pass `[identity]`. |
+| M-1 | Medium | `send()` default signers was `[identity]` — null in hot-key-only mode. Any code path that fell through to the default would crash silently at tx signing. | Changed default to `[identity ?? hotKey]`. `hotKey` is always non-null. |
+| M-2 | Medium | `coordinator.equals(identity.publicKey)` in cancel_round check — null crash in hot-key-only mode. `ixCancelEeRound` also put `identity.publicKey` as signer key without null guard. | Changed to `identityPubkey`; added hot-key-only guard that logs instruction to run `cancel-ee-round.js` on validator server instead of crashing. |
+| L-1 | Low | No `--refresh` flag. Validators who went inactive in hot-key-only mode had no documented way to reactivate. | Added `--refresh` flag: calls `refresh_validator_status` with identity key; blocked in hot-key-only mode with clear error. Added to hotKeyOnlyMode guard list. |
+
+### Frontend docs (`docs/page.tsx`) — findings
+
+| ID | Severity | Issue | Fix |
+|----|----------|-------|-----|
+| D-1 | High | Fee Economics grid: "Premium request fee — set by **protocol authority** via update_dapp_fee." Wrong — `update_dapp_fee` checks `dapp_registration.authority` (the dApp authority). This error persisted through V4.3 and V4.6 audits (Instructions table was corrected but Fee Economics grid was not). | Changed to "set by **dApp authority** via update_dapp_fee — no protocol owner intervention needed." |
+| D-2 | Medium | Security section "On-chain validator selection": `SHA256(round_seed ‖ contributor_pubkey)`. Stale — V4.6 changed the eligibility hash input from `contributor.key()` to `validator_reg.identity`. | Corrected to `SHA256(round_seed ‖ validator_reg.identity)` with note that this is stable across hot-key rotations. |
+| D-3 | Medium | Security section "Validator credential binding": "matches the signing identity" — ambiguous post-V4.6. After hot-key rotation, the commit signer is the hot key, not the identity. The check actually goes against `validator_reg.identity`. | Rewritten to: "init_ee_round and commit_via_ee verify node_pubkey matches `validator_reg.identity` (the registered cold key) — not the transaction signer." |
+| D-4 | Low | FAQ "How do I earn rewards as a validator?": described single-machine setup with identity keypair only. Hot-key-only mode and separate server architecture not mentioned. | Updated to describe recommended separate-server approach with `VALIDATOR_IDENTITY_PUBKEY`. |
+
+### README.md — findings
+
+| ID | Severity | Issue | Fix |
+|----|----------|-------|-----|
+| R-1 | High | Step 3 "Set up a hot key" still showed `VALIDATOR_KEYPAIR + X1_RANDOMNESS_KEYPAIR` on the same machine. No mention of separate randomness server, `VALIDATOR_IDENTITY_PUBKEY`, `scp`, or `--refresh`. | Replaced with full separate-server setup: generate + fund + rotate on validator server; scp hot key; run on randomness server with `VALIDATOR_IDENTITY_PUBKEY`; `--refresh` recovery. |
+| R-2 | Medium | V4.6 changelog daemon section missing `VALIDATOR_IDENTITY_PUBKEY`, `--refresh`, hot-key-only mode description. | Added all three. Updated reward sweep description to cover both modes. |
+
+### CLAUDE.md — findings
+
+| ID | Severity | Issue | Fix |
+|----|----------|-------|-----|
+| C-1 | High | `VALIDATOR_KEYPAIR` listed as "required" in env vars. Now optional when `VALIDATOR_IDENTITY_PUBKEY` is set. | Changed description to "Required in full mode; omit in hot-key-only mode." |
+| C-2 | High | `VALIDATOR_IDENTITY_PUBKEY` env var missing entirely from daemon env vars table and example commands. | Added entry: base58 public key for hot-key-only mode; requires `X1_RANDOMNESS_KEYPAIR`. |
+| C-3 | Medium | No hot-key-only mode example command in "Running the daemons" section. | Added separate-server example with `VALIDATOR_IDENTITY_PUBKEY + X1_RANDOMNESS_KEYPAIR`. |
+| C-4 | Medium | `--refresh` flag not documented in commands section or env vars. | Added to example commands with note it must run on validator server. |
+
+### AUDIT.md — stale reference fixes
+
+| ID | Severity | Issue | Fix |
+|----|----------|-------|-----|
+| A-1 | Low | Daemon PASS section said secrets at `/tmp/vd-secrets-*.json` — path was updated in V4.2 to `~/.config/x1randomness/vd-secrets-<prefix>.json` but AUDIT.md carried the old text. | Updated to correct path with clarifying note. |
+| A-2 | Low | V4.6 H-3 fix description said "scan pairs `[{identity}, {hotKey}]` (deduplicated when equal)" — oversimplified; hot-key-only mode only scans hotKey. | Updated description to cover both modes. |
 
 ---
 

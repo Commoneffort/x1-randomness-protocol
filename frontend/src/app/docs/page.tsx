@@ -370,7 +370,7 @@ export default function DocsPage() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {[
               { label: "Standard request fee", value: `${REQUEST_FEE_LAMPORTS / 1e9} XNT per request` },
-              { label: "Premium request fee", value: "0.05 XNT per request (set by protocol authority via update_dapp_fee)" },
+              { label: "Premium request fee", value: "0.05 XNT per request (set by dApp authority via update_dapp_fee — no protocol owner intervention needed)" },
               { label: "Game seed fee", value: `${GAME_SEED_FEE_LAMPORTS / 1e9} XNT — flows to validators just like request fees` },
               { label: "EE V4 commit stake", value: `${EE_V4_STAKE_LAMPORTS / 1e9} XNT (returned on valid reveal)` },
               { label: "Validator share", value: `${FEE_VALIDATORS_PCT}% of round fees ÷ reveal_count` },
@@ -537,7 +537,7 @@ const ix = new TransactionInstruction({
               },
               {
                 title: "On-chain validator selection",
-                desc: "commit_via_ee enforces entropy-derived eligibility: SHA256(pool_entropy ‖ ee_round_id) → SHA256(round_seed ‖ contributor_pubkey) → compare low 8 bytes against COMMIT_SELECTION_THRESHOLD. No external actor can decide who commits.",
+                desc: "commit_via_ee enforces entropy-derived eligibility: SHA256(pool_entropy ‖ ee_round_id) → SHA256(round_seed ‖ validator_reg.identity) → compare low 8 bytes against COMMIT_SELECTION_THRESHOLD. Uses validator_reg.identity (cold key), not the signer — selection probability is stable across hot-key rotations. No external actor can decide who commits.",
               },
               {
                 title: "ee_round ownership enforced",
@@ -561,7 +561,7 @@ const ix = new TransactionInstruction({
               },
               {
                 title: "Validator credential binding",
-                desc: "register_validator, init_ee_round, and commit_via_ee all read the vote account's node_pubkey (offset 4) and require it matches the signing identity. A validator cannot borrow another's vote or stake accounts to inflate credentials or impersonate them during commits.",
+                desc: "register_validator checks that the vote account's node_pubkey matches the signing identity. init_ee_round and commit_via_ee verify node_pubkey matches validator_reg.identity (the registered cold key) — not the transaction signer. This means a hot-key-rotated validator cannot use a different validator's vote account; the check always goes back to the immutable identity field in the registration.",
               },
               {
                 title: "No premature round advance",
@@ -621,7 +621,7 @@ const ix = new TransactionInstruction({
               },
               {
                 q: "How do I earn rewards as a validator?",
-                a: "Run validator-daemon.js with your identity keypair. It monitors the chain, checks your on-chain entropy-based eligibility each round, commits and reveals autonomously, and calls claim_validator_reward once fees are distributed. Each round pays: original_fees × 95% ÷ reveal_count.",
+                a: "Run validator-daemon.js on a dedicated randomness server. Recommended: generate a hot key on your validator server, rotate authority once (identity key signs once), then run the daemon on a separate server using VALIDATOR_IDENTITY_PUBKEY=<your_pubkey> X1_RANDOMNESS_KEYPAIR=<hotkey.json> — the identity key never touches the randomness server. The daemon monitors the chain, checks on-chain eligibility each round, commits and reveals autonomously, and calls claim_validator_reward once fees are distributed. Each round pays: original_fees × 95% ÷ reveal_count. See the Validators page for step-by-step setup.",
               },
               {
                 q: "What does fee_override do for dApps?",
