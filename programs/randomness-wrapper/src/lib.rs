@@ -1500,14 +1500,15 @@ pub mod randomness_wrapper {
         // Propagate parse_stake_account errors directly so callers receive the exact
         // diagnosis (StakeDeactivating, InvalidStakeAccount, etc.) rather than the
         // misleading InsufficientValidatorStake that a catch-all Err(_)=>false would produce.
-        match parse_stake_account(&stake_data) {
+        let verified_lamports = match parse_stake_account(&stake_data) {
             Ok((voter, lamports)) => {
                 if voter != reg.vote_account || lamports < MIN_VALIDATOR_STAKE {
                     return err!(RandomnessError::InsufficientValidatorStake);
                 }
+                lamports
             }
             Err(e) => return Err(e),
-        }
+        };
         let vote_ok = match parse_last_vote_slot(&vote_data) {
             Ok(last_vote) => current_slot.saturating_sub(last_vote) < VALIDATOR_MAX_INACTIVE_SLOTS,
             Err(_) => false,
@@ -1519,9 +1520,7 @@ pub mod randomness_wrapper {
         reg.active = true;
         reg.consecutive_misses = 0;
         reg.last_active_slot = current_slot;
-        if let Ok((_, lamports)) = parse_stake_account(&stake_data) {
-            reg.verified_stake = lamports;
-        }
+        reg.verified_stake = verified_lamports;
         Ok(())
     }
 

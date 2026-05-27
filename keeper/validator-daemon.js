@@ -106,6 +106,23 @@ if (!hotKey.publicKey.equals(identity.publicKey)) {
 }
 console.log(`RPC         : ${RPC}`);
 
+// Minimum balance the signing key needs to cover the 0.01 XNT commit stake + tx fees.
+// The stake is returned on reveal, so this is float not a recurring cost.
+// Warn early so the operator can top up before missing a round.
+const HOT_KEY_WARN_LAMPORTS  = 50_000_000;   // 0.05 XNT — warn below this
+const HOT_KEY_MIN_LAMPORTS   = 10_100_000;   // 0.0101 XNT — below this commits will fail
+
+async function checkHotKeyBalance() {
+  const signerKey = hotKey.publicKey;
+  const bal = await conn.getBalance(signerKey, "confirmed");
+  if (bal < HOT_KEY_MIN_LAMPORTS) {
+    console.warn(`  ⚠ CRITICAL: signing key (${signerKey.toBase58().slice(0, 8)}…) balance is ${(bal / 1e9).toFixed(4)} XNT — below minimum for commit stake (0.01 XNT). Commits will fail until funded.`);
+  } else if (bal < HOT_KEY_WARN_LAMPORTS) {
+    console.warn(`  ⚠ WARNING: signing key (${signerKey.toBase58().slice(0, 8)}…) balance is ${(bal / 1e9).toFixed(4)} XNT — top up soon (commit stake needs 0.01 XNT float).`);
+  }
+  return bal;
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 function disc(name) {
@@ -354,6 +371,7 @@ async function runOnce() {
   const poolEntropy   = Buffer.from(poolAcct.data.slice(8, 40));
 
   console.log(`\n── Round ${currentRound} / EE ${eeV4RoundId} ──────────────────────────`);
+  await checkHotKeyBalance();
 
   // Check registration
   const [regPda] = valRegPda(identity.publicKey);
