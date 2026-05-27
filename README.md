@@ -428,31 +428,64 @@ Tests 21 instructions in sequence. The EE V4 commit/reveal/finalize cycle waits 
 
 Requirements: ≥1,000 XNT delegated stake, active vote account voting within 500 slots.
 
+### Step 1 — Register (no npm required)
+
+Two options — pick whichever fits your setup:
+
+**Option A — Frontend** (no npm, no server access needed): visit the Validators page, connect your X1 wallet (the connected wallet address becomes your validator identity), enter your vote and stake account pubkeys, and click Register.
+
+**Option B — Server-side script** (no npm, just Node.js ≥ 15):
+
+```bash
+# Clone the repo — no npm install needed for registration
+git clone https://github.com/Commoneffort/x1-randomness-protocol
+cd x1-randomness-protocol
+
+# Register
+node keeper/register.js \
+  --keypair ~/.config/solana/identity.json \
+  --vote    <your_vote_account_pubkey> \
+  --stake   <your_stake_account_pubkey>
+
+# Check status
+node keeper/register.js --status --keypair ~/.config/solana/identity.json
+
+# Deregister
+node keeper/register.js --deregister --keypair ~/.config/solana/identity.json
+```
+
+### Step 2 — Run the daemon (requires npm install once)
+
 ```bash
 cd keeper && npm install
 
-# Register your validator (one-time, identity key required)
-VALIDATOR_KEYPAIR=/path/to/identity.json node validator-daemon.js --register
-
 # Run with identity key signing everything (simplest setup)
 VALIDATOR_KEYPAIR=/path/to/identity.json node validator-daemon.js --loop
+```
 
-# V4.6: Generate a hot key (one-time)
+### Step 3 — Set up a hot key (recommended)
+
+Keeps the identity (cold) key offline after a one-time rotation. Hot key signs all daily commit/reveal/claim operations.
+
+```bash
+# Generate the hot key
 solana-keygen new --no-bip39-passphrase -o ~/.config/solana/x1randomness-hotkey.json
 
-# V4.6: Rotate to the hot key (one-time, identity key signature required)
+# Rotate — identity key signs this once, then stays offline
 VALIDATOR_KEYPAIR=/path/to/identity.json \
-  node validator-daemon.js --rotate-authority $(solana-keygen pubkey ~/.config/solana/x1randomness-hotkey.json)
+  node validator-daemon.js --rotate-authority \
+  $(solana-keygen pubkey ~/.config/solana/x1randomness-hotkey.json)
 
-# V4.6: Run with the hot key — identity key stays cold; hot key signs commit/reveal/claim
+# Run with hot key
 VALIDATOR_KEYPAIR=/path/to/identity.json \
   X1_RANDOMNESS_KEYPAIR=~/.config/solana/x1randomness-hotkey.json \
   node validator-daemon.js --loop
+```
 
-# Deregister (identity key required)
-VALIDATOR_KEYPAIR=/path/to/identity.json node validator-daemon.js --deregister
+### Permissionless crank
 
-# Permissionless crank (anyone can run this — earns 5% crank reward)
+```bash
+# Anyone can run this — earns 5% crank reward, holds zero protocol authority
 CRANK_KEYPAIR=/path/to/any-key.json node run-round.js --loop
 ```
 

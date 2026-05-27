@@ -273,12 +273,28 @@ export default function ValidatorsPage() {
       {/* Registration form */}
       <div className="card">
         <h2 className="text-lg font-semibold text-text-primary mb-1">Register as Validator</h2>
-        <p className="text-sm text-text-secondary mb-4">
+        <p className="text-sm text-text-secondary mb-3">
           Requirements: ≥{MIN_VALIDATOR_STAKE_XNT.toLocaleString()} XNT delegated stake, active vote account voting within {VALIDATOR_MAX_INACTIVE_SLOTS} slots (~3 min). Stake is verified on-chain at registration and on each round refresh — offline validators are kicked automatically.
         </p>
 
+        {/* Two registration paths */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+          <div className="p-3 bg-primary/5 border border-primary/20 rounded-lg text-sm">
+            <p className="font-semibold text-text-primary mb-1">Option A — Register here (no npm)</p>
+            <p className="text-text-secondary text-xs">Connect your X1 Wallet below. The connected wallet address becomes your validator identity key on-chain. Use this if your identity key is in your browser wallet.</p>
+          </div>
+          <div className="p-3 bg-surface-elevated border border-border rounded-lg text-sm">
+            <p className="font-semibold text-text-primary mb-1">Option B — Register on the server (no npm)</p>
+            <p className="text-text-secondary text-xs mb-2">If your identity key lives on the validator server, run this single-file script — no <code className="font-mono">npm install</code> needed:</p>
+            <pre className="text-xs font-mono text-text-primary whitespace-pre-wrap break-all">{`node keeper/register.js \\
+  --keypair ~/.config/solana/identity.json \\
+  --vote    <vote_pubkey> \\
+  --stake   <stake_pubkey>`}</pre>
+          </div>
+        </div>
+
         {!connected ? (
-          <p className="text-text-muted text-sm">Connect your X1 Wallet to register or deregister.</p>
+          <p className="text-text-muted text-sm">Connect your X1 Wallet to register or deregister (Option A).</p>
         ) : myReg ? (
           <div className="space-y-3">
             <div className="p-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-800">
@@ -379,39 +395,57 @@ export default function ValidatorsPage() {
       {/* Validator daemon setup */}
       <div className="card">
         <h2 className="text-lg font-semibold text-text-primary mb-3">Validator Daemon Setup</h2>
-        <p className="text-sm text-text-secondary mb-3">
-          Each validator runs their own daemon independently. The daemon holds only the validator's own identity key — it does not need any other validator's keys. Validators race to commit each round; the on-chain eligibility check (derived from pool entropy) determines who can participate.
+        <p className="text-sm text-text-secondary mb-4">
+          Each validator runs their own daemon independently. The daemon holds only the validator&apos;s own key — no other validator&apos;s keys needed. On-chain entropy-derived eligibility determines who commits each round.
         </p>
-        <pre className="bg-surface-elevated border border-border rounded-lg p-4 text-sm font-mono text-text-primary overflow-x-auto whitespace-pre-wrap">{`# Clone + install
-git clone https://github.com/Commoneffort/x1-randomness-protocol
+
+        {/* Step 1: Register */}
+        <div className="mb-4">
+          <p className="text-sm font-semibold text-text-primary mb-2">Step 1 — Register (one-time, no npm required)</p>
+          <p className="text-xs text-text-secondary mb-2">Use the form above (Option A), or run this directly on your server with Node.js only — no <code className="font-mono">npm install</code>:</p>
+          <pre className="bg-surface-elevated border border-border rounded-lg p-4 text-sm font-mono text-text-primary overflow-x-auto whitespace-pre-wrap">{`# No npm needed — uses only built-in Node.js modules
+node keeper/register.js \\
+  --keypair ~/.config/solana/identity.json \\
+  --vote    <your_vote_account_pubkey> \\
+  --stake   <your_stake_account_pubkey>
+
+# Check status
+node keeper/register.js --status --keypair ~/.config/solana/identity.json
+
+# Deregister
+node keeper/register.js --deregister --keypair ~/.config/solana/identity.json`}</pre>
+        </div>
+
+        {/* Step 2: Run the daemon */}
+        <div className="mb-4">
+          <p className="text-sm font-semibold text-text-primary mb-2">Step 2 — Run the daemon (requires npm install once)</p>
+          <pre className="bg-surface-elevated border border-border rounded-lg p-4 text-sm font-mono text-text-primary overflow-x-auto whitespace-pre-wrap">{`git clone https://github.com/Commoneffort/x1-randomness-protocol
 cd x1-randomness-protocol/keeper
 npm install
 
-# Register your validator (one-time, requires ≥1000 XNT staked)
-VALIDATOR_KEYPAIR=/path/to/your-identity-key.json node validator-daemon.js --register
+# Run (identity key used for all ops — simplest setup)
+VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --loop`}</pre>
+        </div>
 
-# Run the validator daemon (identity key signs init_ee_round; used for all ops until hot key is set)
-VALIDATOR_KEYPAIR=/path/to/your-identity-key.json node validator-daemon.js --loop
-
-# V4.6: Generate a hot key (one-time)
+        {/* Step 3: Hot key */}
+        <div className="mb-3">
+          <p className="text-sm font-semibold text-text-primary mb-2">Step 3 — Set up a hot key (recommended — keeps identity key offline)</p>
+          <pre className="bg-surface-elevated border border-border rounded-lg p-4 text-sm font-mono text-text-primary overflow-x-auto whitespace-pre-wrap">{`# Generate the hot key (on the validator server)
 solana-keygen new --no-bip39-passphrase -o ~/.config/solana/x1randomness-hotkey.json
 
-# V4.6: Rotate to the hot key (one-time, requires identity key signature)
-VALIDATOR_KEYPAIR=/path/to/your-identity-key.json \\
-  node validator-daemon.js --rotate-authority $(solana-keygen pubkey ~/.config/solana/x1randomness-hotkey.json)
+# Rotate — identity key signs this once, then stays offline
+VALIDATOR_KEYPAIR=~/.config/solana/identity.json \\
+  node validator-daemon.js --rotate-authority \\
+  $(solana-keygen pubkey ~/.config/solana/x1randomness-hotkey.json)
 
-# V4.6: Run with the hot key — identity key stays cold; hot key signs commit/reveal/claim
-VALIDATOR_KEYPAIR=/path/to/your-identity-key.json \\
+# Run with hot key — identity key is no longer needed for daily ops
+VALIDATOR_KEYPAIR=~/.config/solana/identity.json \\
   X1_RANDOMNESS_KEYPAIR=~/.config/solana/x1randomness-hotkey.json \\
-  node validator-daemon.js --loop
+  node validator-daemon.js --loop`}</pre>
+        </div>
 
-# Deregister (uses identity key)
-VALIDATOR_KEYPAIR=/path/to/your-identity-key.json node validator-daemon.js --deregister
-
-# Permissionless crank (advances rounds, finalizes, distributes — any wallet, zero authority)
-CRANK_KEYPAIR=/path/to/any-key.json node run-round.js --loop`}</pre>
-        <p className="text-xs text-text-muted mt-3">
-          The crank (<code className="font-mono">run-round.js</code>) and validator daemon (<code className="font-mono">validator-daemon.js</code>) are separate processes. The crank is a public good anyone can run. Your daemon is personal — it commits and claims rewards using your validator key only. V4.6 adds hot key support: keep your identity key offline and use a separate hot key for daily commit/reveal operations.
+        <p className="text-xs text-text-muted">
+          The crank (<code className="font-mono">run-round.js</code>) is a separate permissionless process — any wallet can run it and earn the 5% crank reward. Your daemon is personal: it commits and claims using only your own validator key. V4.6 hot key support lets you keep the identity key (cold) offline after the one-time rotation.
         </p>
       </div>
 

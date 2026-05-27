@@ -132,11 +132,17 @@ VALIDATOR_KEYPAIR=~/.config/solana/identity.json nohup node validator-daemon.js 
 # Validator daemon with hot key (V4.6+, after rotate_randomness_authority):
 VALIDATOR_KEYPAIR=~/.config/solana/identity.json X1_RANDOMNESS_KEYPAIR=~/.config/solana/hotkey.json nohup node validator-daemon.js --loop > /tmp/validator-daemon.log 2>&1 &
 
-# First-time validator registration:
-VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --register
+# First-time validator registration (no npm needed — uses only Node.js built-ins):
+node keeper/register.js \
+  --keypair ~/.config/solana/identity.json \
+  --vote    <vote_account_pubkey> \
+  --stake   <stake_account_pubkey>
 
-# Deregister a validator:
-VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --deregister
+# Check registration status:
+node keeper/register.js --status --keypair ~/.config/solana/identity.json
+
+# Deregister a validator (also no npm needed):
+node keeper/register.js --deregister --keypair ~/.config/solana/identity.json
 
 # Post-V4.6 upgrade: run migration immediately after deploying the new .so
 PAYER_KEYPAIR=~/.config/solana/x1randomness-key.json node keeper/migrate-v46.js
