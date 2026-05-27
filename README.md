@@ -620,7 +620,7 @@ If an EE V4 round is cancelled (status byte 140 == 3), `refund_request` lets req
 - **Key separation** — `ValidatorRegistration` gains `x1_randomness_authority` hot key at offset 139 (size 139→171 bytes). Hot key can sign `commit_via_ee`, `reveal_via_ee`, `claim_validator_reward`. Identity cold key required for `register_validator`, `refresh_validator_status`, `deregister_validator`, `rotate_randomness_authority`. Eligibility hash always uses `identity` (not hot key) so selection probability is stable across rotations.
 - **n=7, m=5** — `init_ee_round` now passes `n=EE_V4_N_CONTRIBUTORS(7)`, `m=EE_V4_M_THRESHOLD(5)` (was n=2, m=2). All 7 selected validators must commit; 5 reveals suffice to finalize (2 may miss the reveal window without blocking the round).
 - **`VALIDATOR_MAX_CONSECUTIVE_MISSES = 5`** — validators can miss 5 rounds before deactivation (was 3), giving more tolerance for network hiccups at n=7.
-- **`refresh_validator_status` explicit errors** — returns `InsufficientValidatorStake` or `ValidatorNotActivelyVoting` instead of a generic error, making recovery easier.
+- **`refresh_validator_status` explicit errors** — returns `InsufficientValidatorStake`, `ValidatorNotActivelyVoting`, `StakeDeactivating`, or `InvalidStakeAccount` with no catch-all swallowing. Each error maps to a distinct operator action.
 - **New instructions** — `migrate_validator_registration` (permissionless, 139→171 bytes), `rotate_randomness_authority` (identity-signed), `revoke_randomness_authority` (identity-signed, resets to identity).
 
 **Keeper (`validator-daemon.js`):**
@@ -629,7 +629,7 @@ If an EE V4 round is cancelled (status byte 140 == 3), `refund_request` lets req
 - `--deregister` flag — sends `deregister_validator` and exits.
 - Reward sweep scans both identity and hot key for unclaimed `ValidatorReveal` PDAs.
 - Commitment hash uses hot key pubkey: `SHA256(secret ‖ nonce ‖ hotKey.publicKey)`.
-- Refresh errors now produce specific log messages for `InsufficientValidatorStake` / `ValidatorNotActivelyVoting`.
+- Refresh errors produce specific log messages for `StakeDeactivating` / `InvalidStakeAccount` / `InsufficientValidatorStake` / `ValidatorNotActivelyVoting`.
 
 **Migration (`keeper/migrate-v46.js`):**
 - Scans all `ValidatorRegistration` accounts by discriminator, reallocates 139→171 bytes, writes `identity` as default `x1_randomness_authority`. Run immediately after V4.6 deploy.

@@ -383,6 +383,8 @@ async function runOnce() {
       const msg = [e.message, ...(e.logs ?? [])].join(" ");
       if (msg.includes("StakeDeactivating") || msg.includes("0x1792")) {
         console.log("  ✗ Stake is deactivating — your stake account has left the active epoch. Re-delegate or use a new stake account.");
+      } else if (msg.includes("InvalidStakeAccount") || msg.includes("0x178f")) {
+        console.log("  ✗ Invalid stake account format — stake account may be uninitialized or corrupted. Check the account registered at --register time.");
       } else if (msg.includes("InsufficientValidatorStake") || msg.includes("0x178c")) {
         console.log("  ✗ Insufficient stake — check stake account balance (need ≥ 1000 XNT)");
       } else if (msg.includes("ValidatorNotActivelyVoting") || msg.includes("0x178d")) {
