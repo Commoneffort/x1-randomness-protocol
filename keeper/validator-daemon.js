@@ -95,9 +95,8 @@ const rotateAuthorityTarget = doRotateAuthority
 const STATE_FILE   = path.join(os.homedir(), ".config", "x1randomness", `vd-secrets-${identity.publicKey.toBase58().slice(0, 8)}.json`);
 const eeRoundCache = new Map(); // eeRoundId (number) → PublicKey; avoids repeated getProgramAccounts scans
 
-// refresh_validator_status backoff — the program returns Ok(()) even when stake/vote checks
-// fail (it just sets active=false). Without backoff the daemon would call refresh every 15s
-// forever while the validator's stake account is activating or delinquent.
+// refresh_validator_status backoff — V4.6+ program returns explicit errors on failure.
+// Backoff prevents hammering the RPC while waiting for stake to activate or vote to catch up.
 let refreshFailCount     = 0;
 let refreshCooldownUntil = 0; // ms timestamp; 0 = no cooldown
 
@@ -382,13 +381,14 @@ async function runOnce() {
       refreshSucceeded = true;
     } catch (e) {
       const msg = [e.message, ...(e.logs ?? [])].join(" ");
-      if (msg.includes("InsufficientValidatorStake") || msg.includes("0x178c")) {
+      if (msg.includes("StakeDeactivating") || msg.includes("0x1792")) {
+        console.log("  ✗ Stake is deactivating — your stake account has left the active epoch. Re-delegate or use a new stake account.");
+      } else if (msg.includes("InsufficientValidatorStake") || msg.includes("0x178c")) {
         console.log("  ✗ Insufficient stake — check stake account balance (need ≥ 1000 XNT)");
       } else if (msg.includes("ValidatorNotActivelyVoting") || msg.includes("0x178d")) {
         console.log("  ✗ Not actively voting — check vote account recency");
       } else {
-        // Pre-V4.6 program (silent Ok) or unknown error — fall through to re-read.
-        // Re-read the account to know whether it actually activated us.
+        // Unknown error or pre-V4.6 fallback — re-read account to check actual activation state.
         const freshReg = await conn.getAccountInfo(regPda);
         if (freshReg && freshReg.data[137] !== 0) {
           refreshSucceeded = true;

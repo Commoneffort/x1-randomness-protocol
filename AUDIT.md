@@ -40,7 +40,8 @@
 **Total V4 audit:** 29 issues found, 28 fixed, 1 non-critical leftover.  
 **Total V4.2 audit:** 15 additional issues found, 15 fixed.  
 **Total V4.3 audit:** 17 additional issues found, 17 fixed.  
-**Total V4.6 audit:** 33 additional issues found, 33 fixed (13 program/daemon/tests + 20 frontend/docs).
+**Total V4.6 audit:** 33 additional issues found, 33 fixed (13 program/daemon/tests + 20 frontend/docs).  
+**Piotr's external audit (2026-05-27) — 2 issues, 2 fixed:** StakeDeactivating error propagation (program + daemon) fixed in post-V4.6 patch; stale daemon comment corrected.
 
 ---
 
@@ -376,5 +377,42 @@ The following vectors were reviewed and are acceptable under the current design:
 | Reward claim against wrong EE round | Mitigated | `claim_validator_reward` now reads EE round ID at offset 40 and requires it matches `fee_escrow.ee_v4_round_id`. |
 
 ---
+
+---
+
+## External Audit — Piotr (2026-05-27) — Post-V4.6 patch
+
+External audit submitted 2026-05-27. Review against V4.6 code performed same day.
+
+### Finding 1 — Silent `refresh_validator_status` failure
+
+**As reported:** `refresh_validator_status` returned `Ok(())` even when stake/vote checks failed, setting `active = false` silently. Daemon could not distinguish success from failure without re-reading the account.
+
+**Post-V4.6 status:** ✅ **FIXED in V4.6.** Handler now returns explicit `InsufficientValidatorStake` (0x178c) or `ValidatorNotActivelyVoting` (0x178d). Daemon correctly interprets these and applies exponential backoff (`60 * 2^n` seconds, max 900s).
+
+### Finding 2 — `StakeDeactivating` misidentified as `InsufficientValidatorStake`
+
+**As reported:** Sentinel validator (604k XNT, stake deactivating) triggered an unhelpful error: operator found 604k XNT on the account (well above 1000 XNT minimum) but the program reported insufficient stake. Root cause: `Err(_) => false` catch-all in the stake match swallowed `StakeDeactivating` from `parse_stake_account` and mapped it to `stake_ok = false`, which then returned `InsufficientValidatorStake`. Operator had no way to diagnose the real cause.
+
+**Post-V4.6 status:** ⚠️ **Present in V4.6 as shipped.** Fixed in post-V4.6 patch (this session, 2026-05-27):
+
+- **`lib.rs`** — `refresh_validator_status` catch-all replaced with direct error propagation:
+  ```rust
+  // Before
+  let stake_ok = match parse_stake_account(&stake_data) {
+      Ok((voter, lamports)) => voter == reg.vote_account && lamports >= MIN_VALIDATOR_STAKE,
+      Err(_) => false,   // StakeDeactivating silently became InsufficientValidatorStake
+  };
+  // After
+  match parse_stake_account(&stake_data) {
+      Ok((voter, lamports)) => {
+          if voter != reg.vote_account || lamports < MIN_VALIDATOR_STAKE {
+              return err!(RandomnessError::InsufficientValidatorStake);
+          }
+      }
+      Err(e) => return Err(e),   // StakeDeactivating (0x1792) propagates correctly
+  }
+  ```
+- **`validator-daemon.js`** — Added `StakeDeactivating` (0x1792) branch with actionable message: *"Stake is deactivating — re-delegate or use a new stake account."* Fixed stale backoff comment that incorrectly said "program returns Ok(()) even when stake/vote checks fail" (true pre-V4.6, false now).
 
 *Audit conducted as part of V4 decentralisation release.*

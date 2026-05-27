@@ -1497,22 +1497,22 @@ pub mod randomness_wrapper {
             RandomnessError::InvalidStakeAccount
         );
 
-        let stake_ok = match parse_stake_account(&stake_data) {
-            Ok((voter, lamports)) => voter == reg.vote_account && lamports >= MIN_VALIDATOR_STAKE,
-            Err(_) => false,
-        };
+        // Propagate parse_stake_account errors directly so callers receive the exact
+        // diagnosis (StakeDeactivating, InvalidStakeAccount, etc.) rather than the
+        // misleading InsufficientValidatorStake that a catch-all Err(_)=>false would produce.
+        match parse_stake_account(&stake_data) {
+            Ok((voter, lamports)) => {
+                if voter != reg.vote_account || lamports < MIN_VALIDATOR_STAKE {
+                    return err!(RandomnessError::InsufficientValidatorStake);
+                }
+            }
+            Err(e) => return Err(e),
+        }
         let vote_ok = match parse_last_vote_slot(&vote_data) {
             Ok(last_vote) => current_slot.saturating_sub(last_vote) < VALIDATOR_MAX_INACTIVE_SLOTS,
             Err(_) => false,
         };
 
-        // Return explicit errors on failure so callers know the exact reason.
-        // Previously returned Ok(()) on failure (silent deactivation) which caused
-        // daemons to retry refresh in a tight loop — they couldn't distinguish
-        // "reactivated" from "still inactive" without re-reading the account.
-        if !stake_ok {
-            return err!(RandomnessError::InsufficientValidatorStake);
-        }
         if !vote_ok {
             return err!(RandomnessError::ValidatorNotActivelyVoting);
         }
