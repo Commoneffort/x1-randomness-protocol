@@ -173,7 +173,7 @@ export default function DocsPage() {
                   ["set_fee", "Update protocol-wide request fee", "Authority"],
                   ["update_dapp_fee", "Set per-dApp fee override (0 = use protocol default)", "dApp authority"],
                   ["migrate_validator_registration", "V4.6 one-time migration: grow ValidatorRegistration 139→171 bytes and set x1_randomness_authority = identity. Permissionless.", "Anyone"],
-                  ["rotate_randomness_authority", "Set a new hot key for commit/reveal/claim — signed by identity (cold key). V4.6+", "Validator (identity)"],
+                  ["rotate_randomness_authority", "Set a new hot key for commit/reveal/init_ee_round/claim — signed by identity (cold key). V4.6+", "Validator (identity)"],
                   ["revoke_randomness_authority", "Reset x1_randomness_authority back to identity. V4.6+", "Validator (identity)"],
                   ["refund_request", "Refund fee if EE V4 round was cancelled (status = 3)", "Requester"],
                   ["close_request", "Close fulfilled RequestState PDA and reclaim rent", "Requester"],
@@ -292,7 +292,7 @@ export default function DocsPage() {
                   ["136", "consecutive_misses", "u8 — 5+ triggers deactivation (V4.6; was 3)"],
                   ["137", "active", "bool"],
                   ["138", "bump", "u8"],
-                  ["139–170", "x1_randomness_authority", "Pubkey — hot key for commit/reveal/claim; equals identity until rotate_randomness_authority is called. Appended V4.6; check data.length >= 171 before reading."],
+                  ["139–170", "x1_randomness_authority", "Pubkey — hot key for commit/reveal/init_ee_round/claim; equals identity until rotate_randomness_authority is called. Appended V4.6; check data.length >= 171 before reading."],
                 ],
               },
               {
@@ -585,7 +585,7 @@ const ix = new TransactionInstruction({
               },
               {
                 title: "Key separation (V4.6) — hot key for daily ops, cold key stays offline",
-                desc: "Each ValidatorRegistration now holds an x1_randomness_authority hot key (offset 139). The hot key can sign commit/reveal/claim; it cannot register, refresh, deregister, or rotate — those still require the identity cold key. Eligibility hash always uses identity (not the hot key) so selection probability is stable across rotations. Rotate via: VALIDATOR_KEYPAIR=identity.json node validator-daemon.js --rotate-authority <hotkey_pubkey>",
+                desc: "Each ValidatorRegistration now holds an x1_randomness_authority hot key (offset 139). The hot key can sign commit/reveal/init_ee_round/claim; it cannot register, refresh, deregister, or rotate — those still require the identity cold key. Eligibility hash always uses identity (not the hot key) so selection probability is stable across rotations. Rotate via: VALIDATOR_KEYPAIR=identity.json node validator-daemon.js --rotate-authority <hotkey_pubkey>",
               },
             ].map(({ title, desc }) => (
               <div key={title} className="flex gap-3 p-3 bg-surface-elevated rounded-lg border border-border">

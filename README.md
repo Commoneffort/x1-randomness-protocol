@@ -86,7 +86,7 @@ Lowering `COMMIT_SELECTION_THRESHOLD` as the validator set grows caps expected c
 | Process | Keys held | Purpose |
 |---------|-----------|---------|
 | `run-round.js` (crank) | Crank key only | Calls permissionless on-chain cranks. Zero protocol authority. |
-| `validator-daemon.js` | Identity key (cold) + optional hot key (`X1_RANDOMNESS_KEYPAIR`) | Each validator runs independently. Monitors chain, commits, reveals, claims rewards. V4.6: hot key signs commit/reveal/claim; identity signs init/register/rotate. |
+| `validator-daemon.js` | Identity key (cold) + optional hot key (`X1_RANDOMNESS_KEYPAIR`) | Each validator runs independently. Monitors chain, commits, reveals, claims rewards. V4.6: hot key signs commit/reveal/claim/init_ee_round; identity signs register/rotate/deregister/refresh. |
 
 The crank has no special power — any node can replace it. Stopping the crank delays round advancement but cannot corrupt randomness.
 
@@ -687,7 +687,7 @@ If an EE V4 round is cancelled (status byte 140 == 3), `refund_request` lets req
 - **New instructions** — `migrate_validator_registration` (permissionless, 139→171 bytes), `rotate_randomness_authority` (identity-signed), `revoke_randomness_authority` (identity-signed, resets to identity).
 
 **Keeper (`validator-daemon.js`):**
-- **Hot-key-only mode** — `VALIDATOR_IDENTITY_PUBKEY=<base58>` + `X1_RANDOMNESS_KEYPAIR=<hotkey.json>` runs the daemon without the identity secret key on the machine. Supports commit/reveal/claim. Skips `init_ee_round` and `refresh_validator_status` (identity-only operations).
+- **Hot-key-only mode** — `VALIDATOR_IDENTITY_PUBKEY=<base58>` + `X1_RANDOMNESS_KEYPAIR=<hotkey.json>` runs the daemon without the identity secret key on the machine. Supports commit/reveal/claim/init_ee_round (hot key accepted as coordinator by the program). Only register/rotate/deregister/refresh require the cold identity key.
 - `X1_RANDOMNESS_KEYPAIR` env var — hot key path for commit/reveal/claim; identity key used when unset.
 - `--rotate-authority <pubkey>` flag — sends `rotate_randomness_authority` and exits.
 - `--deregister` flag — sends `deregister_validator` and exits.
