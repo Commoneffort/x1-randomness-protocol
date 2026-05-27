@@ -437,14 +437,17 @@ VALIDATOR_KEYPAIR=/path/to/identity.json node validator-daemon.js --register
 # Run with identity key signing everything (simplest setup)
 VALIDATOR_KEYPAIR=/path/to/identity.json node validator-daemon.js --loop
 
-# V4.6: Run with a hot key — identity key stays cold; hot key signs commit/reveal/claim
-VALIDATOR_KEYPAIR=/path/to/identity.json \
-  X1_RANDOMNESS_KEYPAIR=/path/to/hot-key.json \
-  node validator-daemon.js --loop
+# V4.6: Generate a hot key (one-time)
+solana-keygen new --no-bip39-passphrase -o ~/.config/solana/x1randomness-hotkey.json
 
-# V4.6: Rotate to a hot key (one-time setup, identity key signature required)
+# V4.6: Rotate to the hot key (one-time, identity key signature required)
 VALIDATOR_KEYPAIR=/path/to/identity.json \
-  node validator-daemon.js --rotate-authority <hot_key_pubkey>
+  node validator-daemon.js --rotate-authority $(solana-keygen pubkey ~/.config/solana/x1randomness-hotkey.json)
+
+# V4.6: Run with the hot key — identity key stays cold; hot key signs commit/reveal/claim
+VALIDATOR_KEYPAIR=/path/to/identity.json \
+  X1_RANDOMNESS_KEYPAIR=~/.config/solana/x1randomness-hotkey.json \
+  node validator-daemon.js --loop
 
 # Deregister (identity key required)
 VALIDATOR_KEYPAIR=/path/to/identity.json node validator-daemon.js --deregister

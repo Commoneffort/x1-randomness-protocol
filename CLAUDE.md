@@ -53,7 +53,8 @@ pkill -f validator-daemon.js
 VALIDATOR_KEYPAIR=~/.config/solana/identity.json nohup node keeper/validator-daemon.js --loop > /tmp/validator-daemon.log 2>&1 &
 
 # 3. Optionally rotate to a hot key (can be done any time after migration)
-VALIDATOR_KEYPAIR=~/.config/solana/identity.json node keeper/validator-daemon.js --rotate-authority <hotkey_pubkey>
+solana-keygen new --no-bip39-passphrase -o ~/.config/solana/x1randomness-hotkey.json
+VALIDATOR_KEYPAIR=~/.config/solana/identity.json node keeper/validator-daemon.js --rotate-authority $(solana-keygen pubkey ~/.config/solana/x1randomness-hotkey.json)
 ```
 
 **Why immediate migration matters:** Until `migrate_validator_registration` is called for each account, ALL instructions that use `Account<ValidatorRegistration>` (commit, refresh, init_ee_round, mark_validator_missed) will fail with a deserialization error. The migration window should be < 30 seconds for 9 validators.
@@ -141,7 +142,8 @@ VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --dere
 PAYER_KEYPAIR=~/.config/solana/x1randomness-key.json node keeper/migrate-v46.js
 
 # Rotate to a hot key (after migration):
-VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --rotate-authority <hotkey_pubkey>
+solana-keygen new --no-bip39-passphrase -o ~/.config/solana/x1randomness-hotkey.json
+VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --rotate-authority $(solana-keygen pubkey ~/.config/solana/x1randomness-hotkey.json)
 ```
 
 **Validator daemon env vars:**
