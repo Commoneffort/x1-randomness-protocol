@@ -470,19 +470,28 @@ The daemon should run on a dedicated server that holds **only the hot key** — 
 **On your validator server (one-time):**
 
 ```bash
-# Generate the hot key
+# 0. Note your identity pubkey — paste it into the systemd service on the new server
+solana-keygen pubkey ~/.config/solana/identity.json
+
+# 1. Generate the hot key
 solana-keygen new --no-bip39-passphrase -o ~/.config/solana/x1randomness-hotkey.json
 
-# Fund the hot key (~0.1 XNT float for commit stakes)
-solana transfer $(solana-keygen pubkey ~/.config/solana/x1randomness-hotkey.json) 0.1 \
+# 2. Fund the hot key (~0.5 XNT is plenty for transaction fees)
+solana transfer $(solana-keygen pubkey ~/.config/solana/x1randomness-hotkey.json) 0.5 \
   --url https://rpc.mainnet.x1.xyz
 
-# Rotate — identity key signs once, then stays offline forever
+# 3. Pull latest code (or clone first time: git clone https://github.com/Commoneffort/x1-randomness-protocol)
+git pull && cd keeper && npm install
+
+# 4. Rotate — identity key signs once, then stays offline forever
 VALIDATOR_KEYPAIR=/path/to/identity.json \
   node validator-daemon.js --rotate-authority \
   $(solana-keygen pubkey ~/.config/solana/x1randomness-hotkey.json)
 
-# Copy ONLY the hot key to the randomness server (never copy identity.json!)
+# 5. Stop the old daemon on this server (the new server takes over)
+pkill -f validator-daemon.js || true
+
+# 6. Copy ONLY the hot key to the randomness server (never copy identity.json!)
 scp ~/.config/solana/x1randomness-hotkey.json user@randomness-server:~/.config/solana/
 ```
 
