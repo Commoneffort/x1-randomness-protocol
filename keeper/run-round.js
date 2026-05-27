@@ -241,6 +241,13 @@ function ixAggregateFromEe(protocolRound, eeRound) {
   });
 }
 
+async function hasFees(round) {
+  const [escrow] = escrowPda(round);
+  const info = await conn.getAccountInfo(escrow);
+  if (!info || info.data.length < 41) return false;
+  return info.data.readBigUInt64LE(24) > 0n; // original_fees at offset 24
+}
+
 function ixDistributeFees(round) {
   const [cfg] = cfgPda(); const [wr] = wrapperPda(round); const [escrow] = escrowPda(round);
   return new TransactionInstruction({ programId: PROGRAM_ID,
@@ -395,14 +402,16 @@ async function runRound() {
     }
 
     console.log(`  [1c] distribute_fees (round ${currentRound})`);
-    try {
-      await send(ixDistributeFees(currentRound), [payer], "distribute_fees");
-    } catch (e) {
-      if (e.message?.includes("FeeEscrowInsufficient") || e.message?.includes("0x177f")) {
-        console.log(`  ↳ No fees (no requests this round)`);
-      } else if (e.message?.includes("AlreadyDistributed")) {
-        console.log(`  ↳ Already distributed`);
-      } else { throw e; }
+    if (!await hasFees(currentRound)) {
+      console.log(`  ↳ No fees (no requests this round)`);
+    } else {
+      try {
+        await send(ixDistributeFees(currentRound), [payer], "distribute_fees");
+      } catch (e) {
+        if (e.message?.includes("AlreadyDistributed")) {
+          console.log(`  ↳ Already distributed`);
+        } else { throw e; }
+      }
     }
   }
 
@@ -534,14 +543,16 @@ async function runRound() {
 
   // ── Step 8: Distribute fees ────────────────────────────────────────────────
   console.log(`\n[8] distribute_fees (round ${nextRound})`);
-  try {
-    await send(ixDistributeFees(nextRound), [payer], "distribute_fees");
-  } catch (e) {
-    if (e.message?.includes("FeeEscrowInsufficient") || e.message?.includes("0x177f")) {
-      console.log(`  ↳ No fees to distribute (no requests this round — ok)`);
-    } else if (e.message?.includes("AlreadyDistributed")) {
-      console.log(`  ↳ Already distributed`);
-    } else { throw e; }
+  if (!await hasFees(nextRound)) {
+    console.log(`  ↳ No fees (no requests this round)`);
+  } else {
+    try {
+      await send(ixDistributeFees(nextRound), [payer], "distribute_fees");
+    } catch (e) {
+      if (e.message?.includes("AlreadyDistributed")) {
+        console.log(`  ↳ Already distributed`);
+      } else { throw e; }
+    }
   }
 
   // ── Done ───────────────────────────────────────────────────────────────────
