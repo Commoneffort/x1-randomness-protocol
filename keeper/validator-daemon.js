@@ -326,11 +326,13 @@ function ixReveal(eeRoundId, eeRound, secret, nonce) {
 // init_ee_round: validator is the coordinator — pays rent for the EE round PDA
 // but has no special authority over the round outcome. n/m/binding_slot are
 // protocol constants derived on-chain.
+// coordinatorKey is the signer (identity in full mode, hotKey in hot-key-only mode).
+// val-reg PDA always uses identityPubkey regardless of which key signs.
 function ixInitEeRound(coordinatorKey, coordinatorVote, coordinatorStake, eeRoundId) {
   const [cfg] = cfgPda();
   const [wr]  = wrapperPda(eeRoundId);
   const [eer] = eeRoundPda(coordinatorKey, eeRoundId);
-  const [reg] = valRegPda(coordinatorKey);
+  const [reg] = valRegPda(identityPubkey);  // always cold identity — PDA seed is identity, not hot key
   return {
     ix: new TransactionInstruction({ programId: PROGRAM_ID,
       keys: [
@@ -472,17 +474,15 @@ async function runOnce() {
       console.log(`  EE round ${eeV4RoundId} not initialised — pool warm, no pending requests, idling`);
       return;
     }
-    if (hotKeyOnlyMode) {
-      // Cannot call init_ee_round without the identity key. Another validator will pick this up.
-      console.log(`  EE round ${eeV4RoundId} not initialised — waiting for another validator to call init_ee_round`);
-      return;
-    }
-    // Current EE round not yet initialized — open it (binding slot not set yet so safe)
+    // Current EE round not yet initialized — open it (binding slot not set yet so safe).
+    // Both identity (full mode) and hot key (hot-key-only mode) are accepted by the program.
+    const initCoordKey    = hotKeyOnlyMode ? hotKey.publicKey : identityPubkey;
+    const initCoordSigner = hotKeyOnlyMode ? hotKey : identity;
     console.log(`  EE round ${eeV4RoundId} not initialised — calling init_ee_round as coordinator`);
-    try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status", [identity]); } catch (_) {}
-    const { ix: initIx, eeRoundPubkey: newEeRoundPubkey } = ixInitEeRound(identityPubkey, voteAccount, stakeAccount, eeV4RoundId);
+    try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status"); } catch (_) {}
+    const { ix: initIx, eeRoundPubkey: newEeRoundPubkey } = ixInitEeRound(initCoordKey, voteAccount, stakeAccount, eeV4RoundId);
     try {
-      await send(initIx, `init_ee_round(id=${eeV4RoundId})`, [identity]);
+      await send(initIx, `init_ee_round(id=${eeV4RoundId})`, [initCoordSigner]);
       eeRoundCache.set(eeV4RoundId, newEeRoundPubkey);
     } catch (initErr) {
       // Another validator may have raced and won — check if the wrapper exists now.
@@ -648,11 +648,10 @@ async function runOnce() {
     if (eeStatus === 0) {
       const coordinator = new PublicKey(eeAcct.data.slice(8, 40));
       const commitCount = eeAcct.data[74];
-      if (coordinator.equals(identityPubkey)) {
-        if (hotKeyOnlyMode) {
-          console.log(`  ⚠ EE round ${eeV4RoundId} stuck in CommitPhase (${commitCount} commits) — we are coordinator but identity key is offline. Run cancel-ee-round.js on your validator server.`);
-          return;
-        }
+      // We are the coordinator if we opened this round (identity in full mode, hot key in hot-key-only mode).
+      const weAreCoordinator = coordinator.equals(identityPubkey) || coordinator.equals(hotKey.publicKey);
+      const cancelSigner = coordinator.equals(hotKey.publicKey) ? hotKey : identity;
+      if (weAreCoordinator && cancelSigner !== null) {
         console.log(`  ⚠ EE round ${eeV4RoundId} stuck in CommitPhase (${commitCount} commits) past binding slot — we are the coordinator, calling cancel_round`);
         // Collect committed contributors for stake refund (ContributorEntry at offset 158, 68 bytes each)
         const contributors = [];
@@ -661,7 +660,7 @@ async function runOnce() {
           contributors.push(new PublicKey(eeAcct.data.slice(base, base + 32)));
         }
         try {
-          await send(ixCancelEeRound(eeRoundPubkey, contributors), `cancel_round(ee=${eeV4RoundId})`, [identity]);
+          await send(ixCancelEeRound(eeRoundPubkey, contributors), `cancel_round(ee=${eeV4RoundId})`, [cancelSigner]);
           console.log(`  ✓ EE round ${eeV4RoundId} cancelled`);
         } catch (cancelErr) {
           if (cancelErr.message?.includes("0x3") || cancelErr.message?.includes("Cancelled")) {
@@ -670,6 +669,9 @@ async function runOnce() {
             console.log(`  ⚠ cancel_round failed: ${cancelErr.message}`);
           }
         }
+      } else if (coordinator.equals(identityPubkey) && hotKeyOnlyMode) {
+        // We opened this round with the identity key on another server — cannot cancel from here.
+        console.log(`  ⚠ EE round ${eeV4RoundId} stuck in CommitPhase (${commitCount} commits) — we are coordinator but identity key is on the validator server. Run cancel-ee-round.js there.`);
       } else {
         console.log(`  ⚠ EE round ${eeV4RoundId} stuck in CommitPhase (${commitCount} commits) past binding slot — waiting for coordinator (${coordinator.toBase58().slice(0,8)}…) to call cancel_round`);
       }
@@ -686,15 +688,14 @@ async function runOnce() {
         if (!await shouldRunEeRound()) {
           console.log(`  EE round ${eeV4RoundId} done — pool warm, no pending requests, idling`);
         } else {
-          if (hotKeyOnlyMode) {
-            console.log(`  EE round ${eeV4RoundId} done — waiting for another validator to open EE round ${nextEeId}`);
-            return;
-          }
+          // Both identity (full mode) and hot key (hot-key-only mode) are accepted by the program.
+          const nextCoordKey    = hotKeyOnlyMode ? hotKey.publicKey : identityPubkey;
+          const nextCoordSigner = hotKeyOnlyMode ? hotKey : identity;
           console.log(`  EE round ${eeV4RoundId} done (status=${eeStatus}) — opening next EE round ${nextEeId}`);
-          try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status", [identity]); } catch (_) {}
-          const { ix: initIx, eeRoundPubkey: newEeRoundPubkey } = ixInitEeRound(identityPubkey, voteAccount, stakeAccount, nextEeId);
+          try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status"); } catch (_) {}
+          const { ix: initIx, eeRoundPubkey: newEeRoundPubkey } = ixInitEeRound(nextCoordKey, voteAccount, stakeAccount, nextEeId);
           try {
-            await send(initIx, `init_ee_round(id=${nextEeId})`, [identity]);
+            await send(initIx, `init_ee_round(id=${nextEeId})`, [nextCoordSigner]);
             eeRoundCache.set(nextEeId, newEeRoundPubkey);
           } catch (initErr) {
             if (await conn.getAccountInfo(nextEeWrAddr)) {

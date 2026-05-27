@@ -172,7 +172,7 @@ VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --refr
 
 **init_ee_round responsibility**: The validator daemon calls `init_ee_round` (NOT the crank). The daemon gates this call on the current EE round being Finalized (status=2) or Cancelled (status=3) — it will NOT advance to the next EE round while the current one is still in progress. The crank polls for the EE WrapperRound PDA in step 3 and waits for a validator daemon to create it.
 
-**Deployment constraint — hot-key-only mode**: `init_ee_round` requires the daemon to hold the cold identity key (it signs with `identity`). Daemons running in hot-key-only mode (`VALIDATOR_IDENTITY_PUBKEY` + `X1_RANDOMNESS_KEYPAIR`) skip `init_ee_round`. **At least one validator must run in full mode (`VALIDATOR_KEYPAIR`)** so that `init_ee_round` is called and new EE rounds can be opened. If all 9 validators switch to hot-key-only mode simultaneously, the protocol will stall after the current EE round finalises — no validator will open the next round.
+**Hot-key-only mode — `init_ee_round` supported**: The Rust program accepts either the cold identity key OR the hot key (`x1_randomness_authority`) as the coordinator signer for `init_ee_round`. Daemons in hot-key-only mode use the hot key as coordinator — the EE round PDA is seeded by the signer key, but the `val-reg` account lookup still uses the cold identity (PDA seed `["val-reg", identity]`). All validators can open rounds regardless of whether they run in full or hot-key-only mode.
 
 ## Security constraints (added V2.2 — do not remove)
 

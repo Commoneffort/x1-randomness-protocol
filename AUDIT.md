@@ -537,8 +537,8 @@ Function was defined but never called — `sweepUnclaimedRewards` builds the cla
 `let totalUnclaimed = 0` was declared and incremented per-pair but never read or logged. Variable removed.
 **Status: FIXED**
 
-**LOW-3 — Undocumented all-hot-key-only protocol stall risk (CLAUDE.md)**
-`init_ee_round` requires the identity key (cold key). Daemons in hot-key-only mode skip it. If all validators switch to hot-key-only mode simultaneously, no daemon would open new EE rounds and the protocol would stall after the current round finalises. Added an explicit warning to the "init_ee_round responsibility" section in CLAUDE.md.
+**LOW-3 — Daemon incorrectly blocked `init_ee_round` in hot-key-only mode (validator-daemon.js)**
+The Rust `InitEeRound` constraint explicitly accepts both identity and hot key as coordinator signer: `coordinator_reg.identity == coordinator.key() || coordinator_reg.x1_randomness_authority == coordinator.key()`. The daemon incorrectly guarded both first-init and next-round-init blocks with `if (hotKeyOnlyMode) { ... return; }`, preventing hot-key-only daemons from ever opening rounds. The `ixInitEeRound` function also derived the `val-reg` PDA from the coordinator signer key instead of always using `identityPubkey` (the PDA seed is always the cold identity). Fixed: removed both guards; `ixInitEeRound` now always uses `identityPubkey` for the val-reg PDA; both init call sites use `hotKey` as coordinator+signer in hot-key-only mode and `identity` in full mode. Cancel-round coordinator check also updated to recognise when the hot key was the coordinator (hot-key-only daemon can now cancel its own stuck rounds directly).
 **Status: FIXED**
 
 **LOW-4 — Stale test account lists (tests/mainnet-e2e.js, no production impact)**
