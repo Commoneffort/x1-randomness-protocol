@@ -4,27 +4,33 @@
  *
  * Each X1 validator runs this daemon independently. It watches the chain for
  * new EE V4 rounds, checks on-chain eligibility (entropy-derived selection),
- * and submits commit/reveal autonomously. No keeper involvement — the validator
- * signs with its own identity key.
+ * and submits commit/reveal autonomously.
  *
  * After each successful reveal, the daemon also calls claim_validator_reward
  * once distribute_fees has run.
  *
- * Usage:
- *   VALIDATOR_KEYPAIR=/path/to/identity.json node validator-daemon.js --register
- *   VALIDATOR_KEYPAIR=/path/to/identity.json node validator-daemon.js --deregister
- *   VALIDATOR_KEYPAIR=/path/to/identity.json node validator-daemon.js [--loop]
- *   VALIDATOR_KEYPAIR=<id> node validator-daemon.js --rotate-authority <hotkey_pubkey>
- *   VALIDATOR_KEYPAIR=<id> X1_RANDOMNESS_KEYPAIR=<hotkey> node validator-daemon.js [--loop]
+ * ── Two operating modes ──────────────────────────────────────────────────────
  *
- * VALIDATOR_KEYPAIR — identity (cold) key. Required for register/deregister/rotate/init_ee_round.
- * X1_RANDOMNESS_KEYPAIR — optional hot key for commit/reveal/claim (V4.6+). If unset, identity
- *   signs all operations. Set after calling --rotate-authority.
+ * FULL MODE (identity key on this server):
+ *   VALIDATOR_KEYPAIR=<identity.json> node validator-daemon.js [--loop]
+ *   VALIDATOR_KEYPAIR=<identity.json> X1_RANDOMNESS_KEYPAIR=<hotkey.json> node validator-daemon.js [--loop]
+ *   VALIDATOR_KEYPAIR=<identity.json> node validator-daemon.js --register
+ *   VALIDATOR_KEYPAIR=<identity.json> node validator-daemon.js --deregister
+ *   VALIDATOR_KEYPAIR=<identity.json> node validator-daemon.js --rotate-authority <hotkey_pubkey>
+ *   Supports: commit, reveal, claim, init_ee_round, refresh_validator_status, register, deregister, rotate.
+ *
+ * HOT-KEY-ONLY MODE (identity key stays on the validator server — never touches this machine):
+ *   VALIDATOR_IDENTITY_PUBKEY=<base58> X1_RANDOMNESS_KEYPAIR=<hotkey.json> node validator-daemon.js [--loop]
+ *   Supports: commit, reveal, claim.
+ *   Skips: init_ee_round (other validators handle it), refresh_validator_status (run manually on validator server).
+ *   To reactivate after going inactive, run on the validator server:
+ *     VALIDATOR_KEYPAIR=<identity.json> node validator-daemon.js --refresh
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
  *
  * Per-round commit entropy (secret + nonce) is persisted to
  * ~/.config/x1randomness/vd-secrets-<pubkeyPrefix>.json before each commit
- * so they survive process restarts. This file does NOT contain the validator
- * signing key — that stays in the keypair file pointed to by VALIDATOR_KEYPAIR.
+ * so they survive process restarts. This file does NOT contain any signing key.
  */
 
 // rpc-websockets dropped CommonClient and WebSocket from its main exports;
@@ -67,19 +73,41 @@ const PROGRAM_ID = new PublicKey("BSKTJpgAGHRaSMLA88chYPKuSuD9qbesEcHYmUrBWU7R")
 const EE_V4      = new PublicKey("FDyWtM9UBNfXNuc5oZJ1V86d3dz635WnqMfX8x5Uifbm");
 const conn       = new Connection(RPC, "confirmed");
 
-const keypairPath = process.env.VALIDATOR_KEYPAIR;
-if (!keypairPath) {
-  console.error("❌ VALIDATOR_KEYPAIR env var required");
-  console.error("   Example: VALIDATOR_KEYPAIR=~/.config/solana/id.json node validator-daemon.js");
+const keypairPath      = process.env.VALIDATOR_KEYPAIR;
+const identityPubkeyEnv = process.env.VALIDATOR_IDENTITY_PUBKEY;
+const hotKeyPath       = process.env.X1_RANDOMNESS_KEYPAIR;
+
+// Hot-key-only mode: identity secret key stays on the validator server.
+// Requires VALIDATOR_IDENTITY_PUBKEY (base58 pubkey) + X1_RANDOMNESS_KEYPAIR (hot key path).
+// Full mode: VALIDATOR_KEYPAIR (identity keypair path), X1_RANDOMNESS_KEYPAIR optional.
+const hotKeyOnlyMode = !keypairPath && !!identityPubkeyEnv;
+
+if (!keypairPath && !identityPubkeyEnv) {
+  console.error("❌ Either VALIDATOR_KEYPAIR or VALIDATOR_IDENTITY_PUBKEY must be set.");
+  console.error("");
+  console.error("  Full mode (identity key on this server):");
+  console.error("    VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --loop");
+  console.error("");
+  console.error("  Hot-key-only mode (identity key stays on validator server):");
+  console.error("    VALIDATOR_IDENTITY_PUBKEY=<base58> X1_RANDOMNESS_KEYPAIR=<hotkey.json> node validator-daemon.js --loop");
   process.exit(1);
 }
-const identity = Keypair.fromSecretKey(
-  new Uint8Array(JSON.parse(fs.readFileSync(keypairPath.replace(/^~/, os.homedir()))))
-);
+if (hotKeyOnlyMode && !hotKeyPath) {
+  console.error("❌ X1_RANDOMNESS_KEYPAIR is required in hot-key-only mode (VALIDATOR_KEYPAIR not set).");
+  process.exit(1);
+}
 
-// V4.6 hot key: signs commit/reveal/claim so the cold identity key can stay offline.
-// If X1_RANDOMNESS_KEYPAIR is not set, hotKey === identity (no behavioral change).
-const hotKeyPath = process.env.X1_RANDOMNESS_KEYPAIR;
+// identity is the full keypair in full mode, null in hot-key-only mode.
+const identity = keypairPath
+  ? Keypair.fromSecretKey(new Uint8Array(JSON.parse(fs.readFileSync(keypairPath.replace(/^~/, os.homedir())))))
+  : null;
+
+// identityPubkey is the public key used for PDA derivation and eligibility checks.
+const identityPubkey = identity
+  ? identity.publicKey
+  : new PublicKey(identityPubkeyEnv);
+
+// Hot key: signs commit/reveal/claim. In full mode defaults to identity if not set.
 const hotKey = hotKeyPath
   ? Keypair.fromSecretKey(new Uint8Array(JSON.parse(fs.readFileSync(hotKeyPath.replace(/^~/, os.homedir())))))
   : identity;
@@ -87,12 +115,20 @@ const hotKey = hotKeyPath
 const doLoop            = process.argv.includes("--loop");
 const doRegister        = process.argv.includes("--register");
 const doDeregister      = process.argv.includes("--deregister");
+const doRefresh         = process.argv.includes("--refresh");
 const doRotateAuthority = process.argv.includes("--rotate-authority");
 const rotateAuthorityTarget = doRotateAuthority
   ? process.argv[process.argv.indexOf("--rotate-authority") + 1]
   : null;
 
-const STATE_FILE   = path.join(os.homedir(), ".config", "x1randomness", `vd-secrets-${identity.publicKey.toBase58().slice(0, 8)}.json`);
+// Guard flags that require the identity keypair
+if (hotKeyOnlyMode && (doRegister || doDeregister || doRotateAuthority || doRefresh)) {
+  console.error("❌ --register, --deregister, --rotate-authority, and --refresh require VALIDATOR_KEYPAIR (identity key).");
+  console.error("   Run these commands on your validator server where identity.json lives.");
+  process.exit(1);
+}
+
+const STATE_FILE   = path.join(os.homedir(), ".config", "x1randomness", `vd-secrets-${identityPubkey.toBase58().slice(0, 8)}.json`);
 const eeRoundCache = new Map(); // eeRoundId (number) → PublicKey; avoids repeated getProgramAccounts scans
 
 // refresh_validator_status backoff — V4.6+ program returns explicit errors on failure.
@@ -100,10 +136,11 @@ const eeRoundCache = new Map(); // eeRoundId (number) → PublicKey; avoids repe
 let refreshFailCount     = 0;
 let refreshCooldownUntil = 0; // ms timestamp; 0 = no cooldown
 
-console.log(`Validator   : ${identity.publicKey.toBase58()}`);
-if (!hotKey.publicKey.equals(identity.publicKey)) {
-  console.log(`Hot key     : ${hotKey.publicKey.toBase58()}`);
+if (hotKeyOnlyMode) {
+  console.log(`Mode        : hot-key-only (identity key is offline)`);
 }
+console.log(`Validator   : ${identityPubkey.toBase58()}`);
+console.log(`Hot key     : ${hotKey.publicKey.toBase58()}`);
 console.log(`RPC         : ${RPC}`);
 
 // Minimum balance the signing key needs to cover the 0.01 XNT commit stake + tx fees.
@@ -132,7 +169,7 @@ function u64le(n) { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(n)); re
 function findPda(seeds) { return PublicKey.findProgramAddressSync(seeds, PROGRAM_ID); }
 function readU64(d, o)  { return Number(d.readBigUInt64LE(o)); }
 
-async function send(ix, label, signers = [identity]) {
+async function send(ix, label, signers = [identity ?? hotKey]) {
   const MAX_ATTEMPTS = 3;
   let lastErr;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -250,7 +287,7 @@ function ixCommit(eeRoundId, eeRound, voteAccount, stakeAccount, commitment) {
   const [cfg] = cfgPda();
   const [pool] = poolPda();
   const [wr]  = wrapperPda(eeRoundId);
-  const [reg] = valRegPda(identity.publicKey);
+  const [reg] = valRegPda(identityPubkey);
   return new TransactionInstruction({ programId: PROGRAM_ID,
     keys: [
       { pubkey: cfg,                     isSigner: false, isWritable: false },
@@ -314,7 +351,7 @@ function ixInitEeRound(coordinatorKey, coordinatorVote, coordinatorStake, eeRoun
 }
 
 function ixRefreshValidatorStatus(voteAccount, stakeAccount) {
-  const [reg] = valRegPda(identity.publicKey);
+  const [reg] = valRegPda(identityPubkey);
   return new TransactionInstruction({ programId: PROGRAM_ID,
     keys: [
       { pubkey: reg,          isSigner: false, isWritable: true },
@@ -332,8 +369,8 @@ function ixRefreshValidatorStatus(voteAccount, stakeAccount) {
 const CANCEL_ROUND_DISC = Buffer.from([82, 70, 134, 54, 46, 96, 148, 8]);
 function ixCancelEeRound(eeRoundPubkey, contributorPubkeys) {
   const keys = [
-    { pubkey: eeRoundPubkey,      isSigner: false, isWritable: true },
-    { pubkey: identity.publicKey, isSigner: true,  isWritable: true },
+    { pubkey: eeRoundPubkey, isSigner: false, isWritable: true },
+    { pubkey: identityPubkey, isSigner: true,  isWritable: true },
     ...contributorPubkeys.map(pk => ({ pubkey: pk, isSigner: false, isWritable: true })),
   ];
   return new TransactionInstruction({ programId: EE_V4, keys, data: CANCEL_ROUND_DISC });
@@ -374,16 +411,24 @@ async function runOnce() {
   await checkHotKeyBalance();
 
   // Check registration
-  const [regPda] = valRegPda(identity.publicKey);
+  const [regPda] = valRegPda(identityPubkey);
   const regAcct  = await conn.getAccountInfo(regPda);
   if (!regAcct) {
-    console.log("  Not registered. Run: VALIDATOR_KEYPAIR=<path> node validator-daemon.js --register");
+    console.log("  Not registered. Run register.js or use the frontend at x1-randomness.vercel.app");
     return;
   }
   const voteAccount  = new PublicKey(regAcct.data.slice(40, 72));
   const stakeAccount = new PublicKey(regAcct.data.slice(72, 104));
   const isActive = regAcct.data[137] !== 0;
   if (!isActive) {
+    if (hotKeyOnlyMode) {
+      // Identity key is not on this server — cannot call refresh_validator_status here.
+      // The operator must run this on the validator server:
+      //   VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --refresh
+      console.log("  ⚠ Validator inactive. Identity key not on this server — cannot auto-refresh.");
+      console.log(`  Run on your validator server: VALIDATOR_KEYPAIR=<identity.json> node validator-daemon.js --refresh`);
+      return;
+    }
     const now = Date.now();
     if (now < refreshCooldownUntil) {
       const waitSecs = Math.ceil((refreshCooldownUntil - now) / 1000);
@@ -394,8 +439,6 @@ async function runOnce() {
     let refreshSucceeded = false;
     try {
       await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status");
-      // V4.6+: program returns explicit Err on failure (InsufficientValidatorStake /
-      // ValidatorNotActivelyVoting). If send() returns without throwing, we were reactivated.
       refreshSucceeded = true;
     } catch (e) {
       const msg = [e.message, ...(e.logs ?? [])].join(" ");
@@ -429,7 +472,7 @@ async function runOnce() {
   }
 
   // Check eligibility for this round
-  if (!isEligible(poolEntropy, eeV4RoundId, identity.publicKey)) {
+  if (!isEligible(poolEntropy, eeV4RoundId, identityPubkey)) {
     console.log(`  Not selected for EE round ${eeV4RoundId} this cycle — waiting for next round`);
     return;
   }
@@ -445,12 +488,17 @@ async function runOnce() {
       console.log(`  EE round ${eeV4RoundId} not initialised — pool warm, no pending requests, idling`);
       return;
     }
+    if (hotKeyOnlyMode) {
+      // Cannot call init_ee_round without the identity key. Another validator will pick this up.
+      console.log(`  EE round ${eeV4RoundId} not initialised — waiting for another validator to call init_ee_round`);
+      return;
+    }
     // Current EE round not yet initialized — open it (binding slot not set yet so safe)
     console.log(`  EE round ${eeV4RoundId} not initialised — calling init_ee_round as coordinator`);
-    try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status"); } catch (_) {}
-    const { ix: initIx, eeRoundPubkey: newEeRoundPubkey } = ixInitEeRound(identity.publicKey, voteAccount, stakeAccount, eeV4RoundId);
+    try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status", [identity]); } catch (_) {}
+    const { ix: initIx, eeRoundPubkey: newEeRoundPubkey } = ixInitEeRound(identityPubkey, voteAccount, stakeAccount, eeV4RoundId);
     try {
-      await send(initIx, `init_ee_round(id=${eeV4RoundId})`);
+      await send(initIx, `init_ee_round(id=${eeV4RoundId})`, [identity]);
       eeRoundCache.set(eeV4RoundId, newEeRoundPubkey);
     } catch (initErr) {
       // Another validator may have raced and won — check if the wrapper exists now.
@@ -616,7 +664,11 @@ async function runOnce() {
     if (eeStatus === 0) {
       const coordinator = new PublicKey(eeAcct.data.slice(8, 40));
       const commitCount = eeAcct.data[74];
-      if (coordinator.equals(identity.publicKey)) {
+      if (coordinator.equals(identityPubkey)) {
+        if (hotKeyOnlyMode) {
+          console.log(`  ⚠ EE round ${eeV4RoundId} stuck in CommitPhase (${commitCount} commits) — we are coordinator but identity key is offline. Run cancel-ee-round.js on your validator server.`);
+          return;
+        }
         console.log(`  ⚠ EE round ${eeV4RoundId} stuck in CommitPhase (${commitCount} commits) past binding slot — we are the coordinator, calling cancel_round`);
         // Collect committed contributors for stake refund (ContributorEntry at offset 158, 68 bytes each)
         const contributors = [];
@@ -625,7 +677,7 @@ async function runOnce() {
           contributors.push(new PublicKey(eeAcct.data.slice(base, base + 32)));
         }
         try {
-          await send(ixCancelEeRound(eeRoundPubkey, contributors), `cancel_round(ee=${eeV4RoundId})`);
+          await send(ixCancelEeRound(eeRoundPubkey, contributors), `cancel_round(ee=${eeV4RoundId})`, [identity]);
           console.log(`  ✓ EE round ${eeV4RoundId} cancelled`);
         } catch (cancelErr) {
           if (cancelErr.message?.includes("0x3") || cancelErr.message?.includes("Cancelled")) {
@@ -650,12 +702,15 @@ async function runOnce() {
         if (!await shouldRunEeRound()) {
           console.log(`  EE round ${eeV4RoundId} done — pool warm, no pending requests, idling`);
         } else {
+          if (hotKeyOnlyMode) {
+            console.log(`  EE round ${eeV4RoundId} done — waiting for another validator to open EE round ${nextEeId}`);
+            return;
+          }
           console.log(`  EE round ${eeV4RoundId} done (status=${eeStatus}) — opening next EE round ${nextEeId}`);
-          try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status"); } catch (_) {}
-          const [nextEeWrAddr] = wrapperPda(nextEeId);
-          const { ix: initIx, eeRoundPubkey: newEeRoundPubkey } = ixInitEeRound(identity.publicKey, voteAccount, stakeAccount, nextEeId);
+          try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status", [identity]); } catch (_) {}
+          const { ix: initIx, eeRoundPubkey: newEeRoundPubkey } = ixInitEeRound(identityPubkey, voteAccount, stakeAccount, nextEeId);
           try {
-            await send(initIx, `init_ee_round(id=${nextEeId})`);
+            await send(initIx, `init_ee_round(id=${nextEeId})`, [identity]);
             eeRoundCache.set(nextEeId, newEeRoundPubkey);
           } catch (initErr) {
             if (await conn.getAccountInfo(nextEeWrAddr)) {
@@ -750,9 +805,14 @@ async function sweepUnclaimedRewards() {
   const REVEAL_DISC = crypto.createHash("sha256")
     .update("account:ValidatorReveal").digest().slice(0, 8);
 
-  // Build scan list: [{contributor, signer}]. Deduplicate when hotKey === identity.
-  const scanPairs = [{ contributor: identity.publicKey, signer: identity }];
-  if (!hotKey.publicKey.equals(identity.publicKey)) {
+  // Build scan list: [{contributor, signer}].
+  // In full mode: scan identity (pre-rotation reveals) + hot key if different.
+  // In hot-key-only mode: only scan hot key (identity secret not available to claim with).
+  const scanPairs = [];
+  if (identity !== null) {
+    scanPairs.push({ contributor: identityPubkey, signer: identity });
+  }
+  if (hotKeyOnlyMode || !hotKey.publicKey.equals(identityPubkey)) {
     scanPairs.push({ contributor: hotKey.publicKey, signer: hotKey });
   }
 
@@ -930,6 +990,19 @@ async function main() {
   }
   if (doDeregister) {
     await deregisterValidator();
+    return;
+  }
+  if (doRefresh) {
+    const [regPda] = valRegPda(identityPubkey);
+    const regAcct  = await conn.getAccountInfo(regPda);
+    if (!regAcct) { console.log("  Not registered."); return; }
+    const voteAccount  = new PublicKey(regAcct.data.slice(40, 72));
+    const stakeAccount = new PublicKey(regAcct.data.slice(72, 104));
+    console.log(`\n[refresh] Validator  : ${identityPubkey.toBase58()}`);
+    console.log(`  Vote account   : ${voteAccount.toBase58()}`);
+    console.log(`  Stake account  : ${stakeAccount.toBase58()}`);
+    await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status", [identity]);
+    console.log("  ✓ Validator status refreshed — active flag re-checked on-chain");
     return;
   }
   if (doRotateAuthority) {

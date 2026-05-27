@@ -416,36 +416,90 @@ node keeper/register.js --status --keypair ~/.config/solana/identity.json
 node keeper/register.js --deregister --keypair ~/.config/solana/identity.json`}</pre>
         </div>
 
-        {/* Step 2: Run the daemon */}
+        {/* Step 2: Hot key + rotate (on validator server) */}
         <div className="mb-4">
-          <p className="text-sm font-semibold text-text-primary mb-2">Step 2 — Run the daemon (requires npm install once)</p>
-          <pre className="bg-surface-elevated border border-border rounded-lg p-4 text-sm font-mono text-text-primary overflow-x-auto whitespace-pre-wrap">{`git clone https://github.com/Commoneffort/x1-randomness-protocol
+          <p className="text-sm font-semibold text-text-primary mb-2">Step 2 — Generate a hot key and rotate (on your validator server)</p>
+          <p className="text-xs text-text-secondary mb-2">The daemon runs on a separate server with only the hot key. The identity key never leaves your validator.</p>
+          <pre className="bg-surface-elevated border border-border rounded-lg p-4 text-sm font-mono text-text-primary overflow-x-auto whitespace-pre-wrap">{`# On your VALIDATOR server — generate hot key
+solana-keygen new --no-bip39-passphrase -o ~/.config/solana/x1randomness-hotkey.json
+
+# Fund the hot key (needs ~0.1 XNT float for commit stakes)
+solana transfer $(solana-keygen pubkey ~/.config/solana/x1randomness-hotkey.json) 0.1 \\
+  --url https://rpc.mainnet.x1.xyz --keypair ~/.config/solana/identity.json
+
+# One-time rotate — identity key signs once, then stays offline forever
+# Clone the repo temporarily if not already on this server:
+#   git clone https://github.com/Commoneffort/x1-randomness-protocol && cd x1-randomness-protocol/keeper && npm install
+VALIDATOR_KEYPAIR=~/.config/solana/identity.json \\
+  node keeper/validator-daemon.js --rotate-authority \\
+  $(solana-keygen pubkey ~/.config/solana/x1randomness-hotkey.json)
+
+# Copy ONLY the hot key to your randomness server (never copy identity.json!)
+scp ~/.config/solana/x1randomness-hotkey.json user@randomness-server:~/.config/solana/`}</pre>
+        </div>
+
+        {/* Step 3: Set up randomness server */}
+        <div className="mb-4">
+          <p className="text-sm font-semibold text-text-primary mb-2">Step 3 — Set up the randomness server (separate machine)</p>
+          <p className="text-xs text-text-secondary mb-2">Install Node.js, clone the repo, and start the daemon using only the hot key + your identity pubkey (no secret).</p>
+          <pre className="bg-surface-elevated border border-border rounded-lg p-4 text-sm font-mono text-text-primary overflow-x-auto whitespace-pre-wrap">{`# ── On your RANDOMNESS SERVER ─────────────────────────────
+
+# 1. Install Node.js 22 via nvm
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+source ~/.bashrc   # or open a new shell
+nvm install 22
+
+# 2. Clone repo and install deps
+git clone https://github.com/Commoneffort/x1-randomness-protocol
 cd x1-randomness-protocol/keeper
 npm install
 
-# Run (identity key used for all ops — simplest setup)
-VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --loop`}</pre>
+# 3. The hot key should already be at ~/.config/solana/x1randomness-hotkey.json
+#    (copied from validator server in Step 2)
+
+# 4. Set up systemd service
+# Replace AAAAAA...  with your validator identity pubkey (base58, public — no secret)
+sudo tee /etc/systemd/system/x1randomness-validator.service << 'EOF'
+[Unit]
+Description=X1 Randomness Protocol Validator Daemon
+After=network.target
+
+[Service]
+User=YOUR_USER
+Environment=VALIDATOR_IDENTITY_PUBKEY=YOUR_IDENTITY_PUBKEY_BASE58
+Environment=X1_RANDOMNESS_KEYPAIR=/home/YOUR_USER/.config/solana/x1randomness-hotkey.json
+ExecStart=/home/YOUR_USER/.nvm/versions/node/v22.22.2/bin/node /home/YOUR_USER/x1-randomness-protocol/keeper/validator-daemon.js --loop
+WorkingDirectory=/home/YOUR_USER/x1-randomness-protocol/keeper
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable x1randomness-validator
+sudo systemctl start x1randomness-validator
+
+# 5. Check logs
+sudo journalctl -u x1randomness-validator -f`}</pre>
         </div>
 
-        {/* Step 3: Hot key */}
+        {/* Reactivation */}
         <div className="mb-3">
-          <p className="text-sm font-semibold text-text-primary mb-2">Step 3 — Set up a hot key (recommended — keeps identity key offline)</p>
-          <pre className="bg-surface-elevated border border-border rounded-lg p-4 text-sm font-mono text-text-primary overflow-x-auto whitespace-pre-wrap">{`# Generate the hot key (on the validator server)
-solana-keygen new --no-bip39-passphrase -o ~/.config/solana/x1randomness-hotkey.json
-
-# Rotate — identity key signs this once, then stays offline
+          <p className="text-sm font-semibold text-text-primary mb-2">Reactivation (if your validator goes inactive)</p>
+          <p className="text-xs text-text-secondary mb-2">After 5 missed rounds the protocol marks your validator inactive. The daemon cannot fix this itself — run this on your validator server:</p>
+          <pre className="bg-surface-elevated border border-border rounded-lg p-4 text-sm font-mono text-text-primary overflow-x-auto whitespace-pre-wrap">{`# On your VALIDATOR server (where identity.json lives)
 VALIDATOR_KEYPAIR=~/.config/solana/identity.json \\
-  node validator-daemon.js --rotate-authority \\
-  $(solana-keygen pubkey ~/.config/solana/x1randomness-hotkey.json)
-
-# Run with hot key — identity key is no longer needed for daily ops
-VALIDATOR_KEYPAIR=~/.config/solana/identity.json \\
-  X1_RANDOMNESS_KEYPAIR=~/.config/solana/x1randomness-hotkey.json \\
-  node validator-daemon.js --loop`}</pre>
+  node keeper/validator-daemon.js --refresh`}</pre>
         </div>
 
         <p className="text-xs text-text-muted">
-          The crank (<code className="font-mono">run-round.js</code>) is a separate permissionless process — any wallet can run it and earn the 5% crank reward. Your daemon is personal: it commits and claims using only your own validator key. V4.6 hot key support lets you keep the identity key (cold) offline after the one-time rotation.
+          The identity key (cold) signs only registration, rotation, and reactivation — all one-time or rare operations.
+          The hot key (on the randomness server) handles all daily commit/reveal/claim operations.
+          The crank (<code className="font-mono">run-round.js</code>) is separate and permissionless — any wallet can run it and earn the 5% crank reward.
         </p>
       </div>
 
