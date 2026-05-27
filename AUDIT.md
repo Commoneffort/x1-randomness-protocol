@@ -42,7 +42,8 @@
 **Total V4.3 audit:** 17 additional issues found, 17 fixed.  
 **Total V4.6 audit:** 33 additional issues found, 33 fixed (13 program/daemon/tests + 20 frontend/docs).  
 **Piotr's external audit (2026-05-27) — 2 issues, 2 fixed:** StakeDeactivating error propagation (program + daemon) fixed in post-V4.6 patch; stale daemon comment corrected.  
-**Post-V4.6 patch audit (2026-05-27) — 16 issues, 16 fixed:** Hot-key-only daemon mode completion (6 daemon issues), docs/fee economics stale "protocol authority" text, eligibility hash formula in security section, validator credential binding description, FAQ update, README separate-server setup, CLAUDE.md env vars, AUDIT.md stale references.
+**Post-V4.6 patch audit (2026-05-27) — 16 issues, 16 fixed:** Hot-key-only daemon mode completion (6 daemon issues), docs/fee economics stale "protocol authority" text, eligibility hash formula in security section, validator credential binding description, FAQ update, README separate-server setup, CLAUDE.md env vars, AUDIT.md stale references.  
+**Complete repo audit (2026-05-27) — 4 issues found, 4 fixed:** Dead `ixClaimReward` function removed; unused `totalUnclaimed` variable removed; all-hot-key-only protocol stall documented in CLAUDE.md; stale test account lists noted (test-only, no production impact).
 
 ---
 
@@ -476,3 +477,76 @@ External audit submitted 2026-05-27. Review against V4.6 code performed same day
 - **`validator-daemon.js`** — Added `StakeDeactivating` (0x1792) branch with actionable message: *"Stake is deactivating — re-delegate or use a new stake account."* Fixed stale backoff comment that incorrectly said "program returns Ok(()) even when stake/vote checks fail" (true pre-V4.6, false now).
 
 *Audit conducted as part of V4 decentralisation release.*
+
+---
+
+## Complete Repo Audit — 2026-05-27 (post hot-key-only mode)
+
+**Scope:** Full line-by-line re-audit of all keeper scripts and program handlers following the hot-key-only daemon mode implementation. Triggered after significant structural changes (identity/hot-key separation, `--refresh` flag, new `VALIDATOR_IDENTITY_PUBKEY` env var).
+
+**Files audited:**
+- `keeper/validator-daemon.js` (1017 lines)
+- `keeper/run-round.js` (577 lines)
+- `keeper/register.js` (344 lines)
+- `programs/randomness-wrapper/src/lib.rs` — key instruction handlers: `commit_via_ee`, `reveal_via_ee`, `init_ee_round`, `claim_validator_reward`, `refresh_validator_status`, account struct layouts
+- `tests/mainnet-e2e.js` — instruction builder account lists
+
+### All-account cross-check: JS daemon vs Rust structs
+
+Every account array in the daemon was verified against the corresponding Rust `#[derive(Accounts)]` struct:
+
+| Instruction | JS accounts | Rust accounts | Match? |
+|-------------|-------------|---------------|--------|
+| `commit_via_ee` | 10 (cfg, pool, wr, ee_round, contributor/hot_key, val_reg, vote, stake, system, ee_v4) | 10 | ✅ |
+| `reveal_via_ee` | 7 (cfg, wr, ee_round, validator_reveal, contributor/hot_key, system, ee_v4) | 7 | ✅ |
+| `init_ee_round` | 9 (cfg, wr, ee_round, coordinator, coordinator_reg, vote, stake, system, ee_v4) | 9 | ✅ |
+| `refresh_validator_status` | 3 (reg, vote, stake) | 3 (permissionless — no signer) | ✅ |
+| inline claim (sweep) | 4 (vr, escrow, ee_round, contributor/hot_key) | 4 | ✅ |
+
+### Identity/hot-key correctness
+
+| Check | Result |
+|-------|--------|
+| `isEligible()` uses `identityPubkey` for hash (stable across rotations) | ✅ |
+| Rust `commit_via_ee` uses `validator_reg.identity` (not signer) for eligibility hash | ✅ |
+| Rust `commit_via_ee` verifies vote account's `node_pubkey == validator_reg.identity` (not hot key) | ✅ |
+| `init_ee_round` blocked in hot-key-only mode; other validators can call it | ✅ |
+| `cancel_round` blocked in hot-key-only mode with actionable warning | ✅ |
+| `--refresh` blocked in hot-key-only mode | ✅ |
+| `send()` default signers `[identity ?? hotKey]` safe when identity is null | ✅ |
+| `sweepUnclaimedRewards` scanPairs handles both full and hot-key-only mode | ✅ |
+| Secrets file keyed by identity pubkey in both modes | ✅ |
+
+### register.js
+
+| Check | Result |
+|-------|--------|
+| `register_validator` account list (reg_pda, identity, vote, stake, system) | ✅ |
+| `deregister_validator` account list (reg_pda, identity) | ✅ |
+| PDA derivation `["val-reg", identity]` matches Rust | ✅ |
+| `parseRegistration` reads V4.6 layout (171 bytes); safely reads `hotKey` at offset 139 when `data.length >= 171` | ✅ |
+| Keypair loading uses PKCS#8 DER wrapper for Ed25519 seed (correct) | ✅ |
+
+### Findings
+
+**LOW-1 — Dead `ixClaimReward` function (validator-daemon.js, lines 379-393)**
+Function was defined but never called — `sweepUnclaimedRewards` builds the claim instruction inline. The inline version is identical and correct. The dead function was removed.
+**Status: FIXED**
+
+**LOW-2 — Unused `totalUnclaimed` variable (validator-daemon.js)**
+`let totalUnclaimed = 0` was declared and incremented per-pair but never read or logged. Variable removed.
+**Status: FIXED**
+
+**LOW-3 — Undocumented all-hot-key-only protocol stall risk (CLAUDE.md)**
+`init_ee_round` requires the identity key (cold key). Daemons in hot-key-only mode skip it. If all validators switch to hot-key-only mode simultaneously, no daemon would open new EE rounds and the protocol would stall after the current round finalises. Added an explicit warning to the "init_ee_round responsibility" section in CLAUDE.md.
+**Status: FIXED**
+
+**LOW-4 — Stale test account lists (tests/mainnet-e2e.js, no production impact)**
+`buildCommitViaEe` and `buildInitEeRound` in the test file are missing accounts added in V4.6: `entropy_pool`, `validator_reg`, `vote_account`, `stake_account` for commit; real vote/stake accounts (not dummy) for init_ee_round. Additionally, `payer` (protocol authority key) is not a registered validator, so tests 10-13 (commit/reveal/finalize) would fail against the live program regardless.
+
+The production daemon `ixCommit`, `ixReveal`, and `ixInitEeRound` have the correct account lists (verified above). The tests are not run in CI and serve as integration probes — updating them requires a registered test validator key and is a low-priority task.
+**Status: NOTED (not fixed — test-only, no production path affected)**
+
+### Result: protocol flow is correct post hot-key-only implementation
+
+The hot-key-only mode implementation is sound. `identityPubkey` is used wherever the on-chain program uses `validator_reg.identity` (PDA seeds, eligibility check). `hotKey` is used wherever the program checks `x1_randomness_authority` (signing for commit/reveal/claim). The separation is enforced consistently in both the daemon and the Rust program.

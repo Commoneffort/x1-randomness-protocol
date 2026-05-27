@@ -376,22 +376,6 @@ function ixCancelEeRound(eeRoundPubkey, contributorPubkeys) {
   return new TransactionInstruction({ programId: EE_V4, keys, data: CANCEL_ROUND_DISC });
 }
 
-function ixClaimReward(eeRound, protocolRound) {
-  const [escrow] = escrowPda(protocolRound);
-  const [vr]     = vrPda(eeRound, hotKey.publicKey); // vr seeded by contributor = hot key after rotation
-  // Account order must match ClaimValidatorReward struct:
-  // validator_reveal, fee_escrow, ee_round, contributor
-  return new TransactionInstruction({ programId: PROGRAM_ID,
-    keys: [
-      { pubkey: vr,                  isSigner: false, isWritable: true  },
-      { pubkey: escrow,              isSigner: false, isWritable: true  },
-      { pubkey: eeRound,             isSigner: false, isWritable: false },
-      { pubkey: hotKey.publicKey,    isSigner: true,  isWritable: true  },
-    ],
-    data: disc("claim_validator_reward"),
-  });
-}
-
 // ── Main ────────────────────────────────────────────────────────────────────────
 
 async function runOnce() {
@@ -816,7 +800,6 @@ async function sweepUnclaimedRewards() {
     scanPairs.push({ contributor: hotKey.publicKey, signer: hotKey });
   }
 
-  let totalUnclaimed = 0;
   for (const { contributor, signer } of scanPairs) {
     const myReveals = await conn.getProgramAccounts(PROGRAM_ID, {
       filters: [
@@ -826,7 +809,6 @@ async function sweepUnclaimedRewards() {
       ],
     });
     if (!myReveals.length) continue;
-    totalUnclaimed += myReveals.length;
 
     // Batch-fetch all fee escrows (chunks of 100 — RPC limit)
     const escrowAddrs = myReveals.map(r => escrowPda(readU64(r.account.data, 72))[0]);
