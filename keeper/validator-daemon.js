@@ -369,10 +369,10 @@ function ixRefreshValidatorStatus(voteAccount, stakeAccount) {
 // (from ContributorEntry structs in the EE round account) — passed as remaining_accounts
 // so they get their stake returned.
 const CANCEL_ROUND_DISC = Buffer.from([82, 70, 134, 54, 46, 96, 148, 8]);
-function ixCancelEeRound(eeRoundPubkey, contributorPubkeys) {
+function ixCancelEeRound(eeRoundPubkey, coordinatorPubkey, contributorPubkeys) {
   const keys = [
-    { pubkey: eeRoundPubkey, isSigner: false, isWritable: true },
-    { pubkey: identityPubkey, isSigner: true,  isWritable: true },
+    { pubkey: eeRoundPubkey,     isSigner: false, isWritable: true },
+    { pubkey: coordinatorPubkey, isSigner: true,  isWritable: true },
     ...contributorPubkeys.map(pk => ({ pubkey: pk, isSigner: false, isWritable: true })),
   ];
   return new TransactionInstruction({ programId: EE_V4, keys, data: CANCEL_ROUND_DISC });
@@ -660,7 +660,7 @@ async function runOnce() {
           contributors.push(new PublicKey(eeAcct.data.slice(base, base + 32)));
         }
         try {
-          await send(ixCancelEeRound(eeRoundPubkey, contributors), `cancel_round(ee=${eeV4RoundId})`, [cancelSigner]);
+          await send(ixCancelEeRound(eeRoundPubkey, cancelSigner.publicKey, contributors), `cancel_round(ee=${eeV4RoundId})`, [cancelSigner]);
           console.log(`  ✓ EE round ${eeV4RoundId} cancelled`);
         } catch (cancelErr) {
           if (cancelErr.message?.includes("0x3") || cancelErr.message?.includes("Cancelled")) {
