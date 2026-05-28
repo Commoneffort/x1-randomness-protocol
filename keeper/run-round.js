@@ -383,8 +383,15 @@ async function runRound() {
             process.stdout.write(`\r  slot ${cur1}: still too early, retrying in 10s…`);
             await new Promise(r => setTimeout(r, 10000));
           } else if (eText.includes("0x1771") || eText.includes("WrongPhase")) {
-            // Round was cancelled between our status check and the tx landing.
-            console.log(`\n  EE round ${thisEeId} transitioned to cancelled — skipping finalize`);
+            // WrongPhase can mean CommitPhase (stuck, awaiting cancel_round) or
+            // Cancelled (status=3). Re-read actual status to distinguish.
+            const eeStatusNow = (await conn.getAccountInfo(eeRoundPubkey1))?.data[140];
+            if (eeStatusNow === 3) {
+              console.log(`\n  EE round ${thisEeId} cancelled — skipping finalize`);
+            } else {
+              console.log(`\n  EE round ${thisEeId} still in CommitPhase (status=${eeStatusNow}) — coordinator must call cancel_round first`);
+              throw new Error(`EE round ${thisEeId} stuck in CommitPhase past binding slot — waiting for coordinator cancel`);
+            }
             break;
           } else { throw e; }
         }
@@ -523,7 +530,13 @@ async function runRound() {
           process.stdout.write(`\r  slot ${s}: still too early, retrying in 10s…`);
           await new Promise(r => setTimeout(r, 10000));
         } else if (eText.includes("0x1771") || eText.includes("WrongPhase")) {
-          console.log(`\n  EE round ${nextEeId} transitioned to cancelled — skipping finalize`);
+          const eeStatusNow = (await conn.getAccountInfo(eeRoundPubkey))?.data[140];
+          if (eeStatusNow === 3) {
+            console.log(`\n  EE round ${nextEeId} cancelled — skipping finalize`);
+          } else {
+            console.log(`\n  EE round ${nextEeId} still in CommitPhase (status=${eeStatusNow}) — coordinator must call cancel_round first`);
+            throw new Error(`EE round ${nextEeId} stuck in CommitPhase past binding slot — waiting for coordinator cancel`);
+          }
           break;
         } else { throw e; }
       }

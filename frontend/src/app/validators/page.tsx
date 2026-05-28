@@ -30,6 +30,7 @@ export default function ValidatorsPage() {
   const [regError, setRegError] = useState<string | null>(null);
   const [regSuccess, setRegSuccess] = useState<string | null>(null);
   const [currentSlot, setCurrentSlot] = useState(0);
+  const [lastAggregatedSlot, setLastAggregatedSlot] = useState(0);
 
   const fetchReveals = useCallback(async () => {
     if (!publicKey) return;
@@ -49,13 +50,15 @@ export default function ValidatorsPage() {
   const fetchRegistry = useCallback(async () => {
     setRegistryLoading(true);
     try {
-      const [all, slot] = await Promise.all([
+      const [all, slot, pool] = await Promise.all([
         client.getAllValidatorRegistrations(),
         client.connection.getSlot("confirmed"),
+        client.getEntropyPool(),
       ]);
       all.sort((a, b) => Number(b.verifiedStake) - Number(a.verifiedStake));
       setAllValidators(all);
       setCurrentSlot(slot);
+      if (pool) setLastAggregatedSlot(pool.lastAggregatedSlot);
       if (publicKey) {
         const me = all.find(v => v.identity === publicKey.toBase58()) ?? null;
         setMyReg(me);
@@ -184,11 +187,18 @@ export default function ValidatorsPage() {
     return `${Math.floor(secs / 3600)}h ago`;
   };
 
-  // isStale is a display hint only — VALIDATOR_MAX_INACTIVE_SLOTS is a commit-eligibility
-  // constraint, not a heartbeat. With the idle gate, validators go hundreds of slots between
-  // rounds. A validator is truly offline only when active === false (consecutive_misses >= 5).
-  const isStale = (v: ValidatorRegistration) =>
-    currentSlot - v.lastActiveSlot > VALIDATOR_MAX_INACTIVE_SLOTS && !v.active;
+  // One full round cycle: commit window (200) + reveal (400) + binding slot (675) + overhead ≈ 1400 slots.
+  // If a validator's last commit is more than 2 round cycles before the last aggregation,
+  // they missed at least one recent round even if the protocol was active.
+  // This fires regardless of active flag — consecutive_misses stays 0 until mark_validator_missed
+  // is implemented, so active===true alone is not a reliable liveness signal.
+  const ROUND_CYCLE_SLOTS = 1400;
+  const validatorStatus = (v: ValidatorRegistration): "active" | "not-committing" | "inactive" => {
+    if (!v.active) return "inactive";
+    if (lastAggregatedSlot > 0 && lastAggregatedSlot - v.lastActiveSlot > ROUND_CYCLE_SLOTS * 2)
+      return "not-committing";
+    return "active";
+  };
 
   return (
     <div className="space-y-6">
@@ -237,8 +247,7 @@ export default function ValidatorsPage() {
               </thead>
               <tbody className="divide-y divide-border">
                 {allValidators.map(v => {
-                  const stale = isStale(v);
-                  const online = v.active;
+                  const status = validatorStatus(v);
                   return (
                     <tr key={v.identity} className="text-text-primary">
                       <td className="py-2 pr-4 font-mono text-xs">
@@ -252,13 +261,13 @@ export default function ValidatorsPage() {
                       <td className="py-2 pr-4">{v.consecutiveMisses}</td>
                       <td className="py-2">
                         <span className={`text-xs px-2 py-0.5 rounded-full border ${
-                          online
+                          status === "active"
                             ? "bg-green-50 text-green-700 border-green-200"
-                            : stale
-                            ? "bg-red-50 text-red-700 border-red-200"
+                            : status === "not-committing"
+                            ? "bg-orange-50 text-orange-700 border-orange-200"
                             : "bg-yellow-50 text-yellow-700 border-yellow-200"
                         }`}>
-                          {online ? "Active" : stale ? "Offline" : "Inactive"}
+                          {status === "active" ? "Active" : status === "not-committing" ? "Not committing" : "Inactive"}
                         </span>
                       </td>
                     </tr>
