@@ -40,6 +40,38 @@ solana program deploy \
 
 Each program upgrade costs approximately 1.25–1.5 XNT from the payer wallet. Check balance before upgrading (`solana balance ~/.config/solana/x1randomness-key.json --url https://rpc.mainnet.x1.xyz`).
 
+### V4.7 post-upgrade sequence (2026-05-29)
+
+No on-chain migration required. Restart daemons and crank immediately — old V4.6 daemons will fail reveals and inits because `reveal_via_ee` and `init_ee_round` have new required accounts.
+
+```bash
+# All validators: git pull and restart
+cd ~/x1-randomness-protocol && git pull && cd keeper && npm install && cd ..
+pkill -f validator-daemon.js
+
+# Recommended: hot-key-only mode (identity pubkey, not the secret key)
+VALIDATOR_IDENTITY_PUBKEY=<your_identity_pubkey_base58> \
+X1_RANDOMNESS_KEYPAIR=~/.config/solana/x1randomness-hotkey.json \
+nohup node keeper/validator-daemon.js --loop > /tmp/validator-daemon.log 2>&1 &
+
+# owlx1 server specifically (hot-key-only):
+VALIDATOR_IDENTITY_PUBKEY=8byEUEZ2sMfP6RPX9VD8JCvCQK3F5FG2LytcR9TkVWag \
+X1_RANDOMNESS_KEYPAIR=~/.config/solana/x1randomness-hotkey.json \
+nohup node keeper/validator-daemon.js --loop > /tmp/validator-daemon.log 2>&1 &
+
+# Crank restart (owlx1):
+pkill -f run-round.js
+CRANK_KEYPAIR=~/.config/solana/x1randomness-key.json \
+nohup node keeper/run-round.js --loop > /tmp/crank.log 2>&1 &
+```
+
+**What changed in V4.7 that breaks old daemons:**
+- `reveal_via_ee` — added `validator_reg` account (position 5 in key list). Old daemon sends 7 accounts, program now requires 8. Reveals rejected.
+- `init_ee_round` — added `fee_escrow` account (position 7 in key list). Old daemon sends 9 accounts, program now requires 10. Round-opening rejected.
+- No account migration needed (new PDAs like `ValidatorMissRecord` are created on demand, not pre-migrated).
+
+**Locked rewards from pre-V4.7:** The `hasFees()` bug (offset 24 instead of 8) caused the crank to skip `distribute_fees` every round since commit `1753b1d`. Rewards accumulated in FeeEscrow accounts with `fee_distributed = false`. The upgraded crank will distribute normally going forward. Locked pre-V4.7 escrows will be swept by the protocol authority via `claim_validator_fees` in a future maintenance pass.
+
 ### V4.6 post-upgrade sequence
 
 After deploying V4.6, run these steps immediately (before any validator daemon activity):
@@ -188,6 +220,10 @@ VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --refr
 - **Staleness hard limit** — pool entropy older than `STALENESS_HARD_LIMIT_SLOTS` (21 600 slots ≈ 2.25 hours) routes `request_randomness` to the queue path instead of the fast path. Matches the keeper idle gate threshold.
 - **`deliver_callback`** — requires a `caller: Signer` (permissionless crank but must sign).
 - **Key separation (V4.6)** — `rotate_randomness_authority` requires the `identity` cold key to sign. The hot key (`x1_randomness_authority`) can sign `commit_via_ee`, `reveal_via_ee`, `claim_validator_reward`. It cannot register, refresh, deregister, or rotate — those still require the identity key. Eligibility hash always uses `identity`, not the hot key, so selection is stable across rotations.
+- **`reveal_via_ee` enforces `contributor == x1_randomness_authority` (V4.7)** — the ValidatorReveal PDA is seeded by `x1_randomness_authority` (not the raw signer key), making the PDA address deterministic and consistent with `mark_validator_missed`. `validate_reg` is a required account in the instruction.
+- **`mark_validator_missed` idempotency (V4.7)** — a `ValidatorMissRecord` PDA (`seeds: [b"miss-record", ee_round, identity]`) is created per call. Anchor's `init` constraint rejects repeated calls for the same (validator, round) pair, preventing spam-deactivation attacks.
+- **`game_seed` staleness guard (V4.7)** — rejects pool entropy older than `STALENESS_HARD_LIMIT_SLOTS` (21,600 slots), matching the `request_randomness` fast-path limit. Prevents outcome pre-computation from known stale entropy.
+- **`fulfill_queued_request` (V4.7)** — new permissionless instruction that delivers entropy to `RequestState` accounts stuck with `fulfilled=false` after a successful round. Resolves queue-path requests that would otherwise be permanently unresolvable.
 - **NEVER reduce `MIN_EE_M_THRESHOLD`** — a stuck round is recoverable via `cancel_round`; biasable randomness is not. Do not lower thresholds to unstick a round.
 
 ## Architecture notes
@@ -213,16 +249,18 @@ distribute_fees()        → requires protocol WrapperRound.aggregated == true
 
 `distribute_fees` will return `RoundNotAggregatable` if `aggregate_from_ee` has not been called on the protocol WrapperRound after EE finalization.
 
-### Per-validator reward flow (V4.5)
+### Per-validator reward flow (V4.5, updated V4.7)
 
 ```
-reveal_via_ee()          → creates ValidatorReveal PDA [b"validator-reveal", ee_round, contributor]
+reveal_via_ee()          → creates ValidatorReveal PDA [b"validator-reveal", ee_round, x1_randomness_authority]
+                           (V4.7: seed changed from contributor.key() to x1_randomness_authority for determinism)
 distribute_fees()        → records original_fees on FeeEscrow; pays 5% to crank immediately
 claim_validator_reward() → pays original_fees × 95% ÷ reveal_count to contributor
                            reads reveal_count from EE V4 round data at offset 75
+                           (V4.7: closes ValidatorReveal PDA on claim — returns ~0.00146 XNT rent)
 ```
 
-Each validator gets one claim per round. `claim_validator_reward` marks `ValidatorReveal.claimed = true` and rejects if already set.
+Each validator gets one claim per round. `claim_validator_reward` closes the `ValidatorReveal` PDA (V4.7) and rejects if already claimed.
 
 ### EE V4 binding slot minimum
 
@@ -306,13 +344,25 @@ Constants: `MIN_VALIDATOR_STAKE = 1000 XNT`, `VALIDATOR_MAX_INACTIVE_SLOTS = 500
 
 | Offset | Field |
 |--------|-------|
-| 8–39 | `contributor` (Pubkey) |
+| 8–39 | `contributor` (Pubkey) — stores `x1_randomness_authority` (V4.7; was the raw signer key before) |
 | 40–71 | `ee_round` (Pubkey) |
 | 72–79 | `protocol_round` (u64) |
 | 80 | `claimed` (bool) |
 | 81 | `bump` (u8) |
 
-Seeds: `[b"validator-reveal", ee_round.key(), contributor.key()]`
+Seeds: `[b"validator-reveal", ee_round.key(), x1_randomness_authority.key()]`
+
+> **V4.7 change:** Seed was previously `contributor.key()` (the raw signer, which could be identity or hot key). Now always uses `x1_randomness_authority` so `mark_validator_missed` can derive the address deterministically. `reveal_via_ee` enforces `contributor == x1_randomness_authority`. PDA is **closed on claim** (V4.7) — rent returned to contributor.
+
+### ValidatorMissRecord (9 bytes — added V4.7)
+
+Seeds: `[b"miss-record", ee_round.key(), identity.key()]`
+
+| Offset | Field |
+|--------|-------|
+| 8 | `bump` (u8) |
+
+Created by `mark_validator_missed` as an idempotency guard. One record per (validator, EE round). The Anchor `init` constraint prevents calling the instruction twice for the same pair.
 
 ### DappRegistration (145 bytes — V3 added `fee_override`)
 
@@ -357,9 +407,17 @@ Full field layout (Borsh/Anchor, no padding):
 
 **cancel_round** (EE program direct call, not via wrapper):
 - Required when: status=CommitPhase (0) and round is stuck (reveal window passed, not enough commits)
-- Signer: round coordinator (validator who called init_ee_round)  
+- Signer: round coordinator (validator who called init_ee_round)
 - remaining_accounts: committed contributor wallets in order (for stake refund)
-- Script: `keeper/cancel-ee-round.js` — usage: `EE_ROUND_ID=<id> VALIDATOR_KEYPAIR=~/.config/solana/identity.json node cancel-ee-round.js`
+- Script: `keeper/cancel-ee-round.js` — accepts identity key OR hot key depending on which opened the round:
+  ```bash
+  # If round was opened with identity key (full mode):
+  EE_ROUND_ID=<id> VALIDATOR_KEYPAIR=~/.config/solana/identity.json node cancel-ee-round.js
+  # If round was opened with hot key (hot-key-only mode):
+  EE_ROUND_ID=<id> X1_RANDOMNESS_KEYPAIR=~/.config/solana/x1randomness-hotkey.json node cancel-ee-round.js
+  ```
+
+**Stuck rounds and protocol liveness (V4.7):** When a round gets stuck (CommitPhase or RevealPhase) and the slot hash expires (`cur > binding_slot + 512` ≈ 7.4 min after binding), the V4.7 daemon abandons it and opens the next EE round regardless. The stuck round becomes an orphan — committed stakes stay locked in the EE round PDA until the coordinator manually calls `cancel_round`. The protocol keeps progressing. Rounds do NOT need to be cancelled for the protocol to advance; cancellation is only needed to recover committed stakes.
 
 ## Fee economics
 
