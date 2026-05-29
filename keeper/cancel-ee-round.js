@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 // Cancels a stuck EE V4 round that never reached RevealPhase.
 // Must be run by the round's coordinator (the validator who called init_ee_round).
-// Usage: EE_ROUND_ID=<id> VALIDATOR_KEYPAIR=~/.config/solana/identity.json node cancel-ee-round.js
+//
+// Usage — identity key as coordinator (classic mode):
+//   EE_ROUND_ID=<id> VALIDATOR_KEYPAIR=~/.config/solana/identity.json node cancel-ee-round.js
+//
+// Usage — hot key as coordinator (hot-key-only mode):
+//   EE_ROUND_ID=<id> X1_RANDOMNESS_KEYPAIR=~/.config/solana/x1randomness-hotkey.json node cancel-ee-round.js
 
 const { Connection, Keypair, PublicKey, Transaction, TransactionInstruction, sendAndConfirmTransaction } = require("@solana/web3.js");
 const fs   = require("fs");
@@ -24,11 +29,20 @@ const CANCEL_DISC = Buffer.from([82, 70, 134, 54, 46, 96, 148, 8]);
 
 const RPC = process.env.RPC_URL || "https://rpc.mainnet.x1.xyz";
 
-const keypairPath = process.env.VALIDATOR_KEYPAIR;
-if (!keypairPath) { console.error("VALIDATOR_KEYPAIR env var required"); process.exit(1); }
-const identity = Keypair.fromSecretKey(
-  Uint8Array.from(JSON.parse(fs.readFileSync(keypairPath.replace(/^~/, os.homedir()), "utf8")))
+// Accept either VALIDATOR_KEYPAIR (cold identity) or X1_RANDOMNESS_KEYPAIR (hot key as coordinator).
+const identityPath = process.env.VALIDATOR_KEYPAIR;
+const hotKeyPath   = process.env.X1_RANDOMNESS_KEYPAIR;
+if (!identityPath && !hotKeyPath) {
+  console.error("Set VALIDATOR_KEYPAIR (identity key) or X1_RANDOMNESS_KEYPAIR (hot key) env var");
+  process.exit(1);
+}
+const coordinatorKeypair = Keypair.fromSecretKey(
+  Uint8Array.from(JSON.parse(fs.readFileSync(
+    (identityPath || hotKeyPath).replace(/^~/, os.homedir()), "utf8"
+  )))
 );
+// Keep legacy alias for clarity in log messages
+const identity = coordinatorKeypair;
 
 if (!process.env.EE_ROUND_ID) {
   console.error("EE_ROUND_ID env var required");
@@ -74,9 +88,10 @@ async function main() {
     process.exit(0);
   }
 
-  if (!coordinator.equals(identity.publicKey)) {
-    console.error(`You are ${identity.publicKey.toBase58()} but coordinator is ${coordinator.toBase58()}.`);
-    console.error("Only the coordinator can cancel. Run this script as the coordinator validator.");
+  if (!coordinator.equals(coordinatorKeypair.publicKey)) {
+    console.error(`You are ${coordinatorKeypair.publicKey.toBase58()} but coordinator is ${coordinator.toBase58()}.`);
+    console.error("Only the coordinator can cancel.");
+    console.error("If the round was opened with the hot key, set X1_RANDOMNESS_KEYPAIR instead of VALIDATOR_KEYPAIR.");
     process.exit(1);
   }
 
@@ -104,7 +119,7 @@ async function main() {
 
   const tx = new Transaction().add(ix);
   console.log("\nSending cancel_round…");
-  const sig = await sendAndConfirmTransaction(conn, tx, [identity], { commitment: "confirmed" });
+  const sig = await sendAndConfirmTransaction(conn, tx, [coordinatorKeypair], { commitment: "confirmed" });
   console.log(`✓ cancel_round: ${sig}`);
   console.log(`EE round ${TARGET_EE_ID} cancelled — validator daemons will now open EE round ${TARGET_EE_ID + 1n}.`);
 }

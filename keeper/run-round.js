@@ -245,7 +245,7 @@ async function hasFees(round) {
   const [escrow] = escrowPda(round);
   const info = await conn.getAccountInfo(escrow);
   if (!info || info.data.length < 41) return false;
-  return info.data.readBigUInt64LE(24) > 0n; // original_fees at offset 24
+  return info.data.readBigUInt64LE(8) > 0n; // pending_fees at offset 8 (original_fees at 24 is only set by distribute_fees itself)
 }
 
 function ixDistributeFees(round) {
@@ -403,8 +403,13 @@ async function runRound() {
       await send(ixAggregateFromEe(currentRound, eeRoundPubkey1), [payer], "aggregate_from_ee");
     } catch (e) {
       const eText = e.message + JSON.stringify(e.logs ?? []);
-      if (eText.includes("already") || eText.includes("0x0")) {
+      if (eText.includes("already") || eText.includes("0x0") || eText.includes("RoundAlreadyAggregated")) {
         console.log(`  ↳ Already aggregated`);
+      } else if (eText.includes("EeV4RoundNotFinalized") || eText.includes("0x1775")) {
+        // EE round was cancelled — aggregate_from_ee requires Finalized status.
+        // Skip aggregation; protocol round stays non-aggregated until a new EE round
+        // is opened, completes, and aggregate_from_ee succeeds for it.
+        console.log(`  ↳ EE round ${thisEeId} was cancelled — skipping aggregate (will retry when next EE round completes)`);
       } else { throw e; }
     }
 
@@ -549,8 +554,10 @@ async function runRound() {
     await send(ixAggregateFromEe(nextRound, eeRoundPubkey), [payer], "aggregate_from_ee");
   } catch (e) {
     const eText = e.message + JSON.stringify(e.logs ?? []);
-    if (eText.includes("already") || eText.includes("0x0")) {
+    if (eText.includes("already") || eText.includes("0x0") || eText.includes("RoundAlreadyAggregated")) {
       console.log(`  ↳ Already aggregated`);
+    } else if (eText.includes("EeV4RoundNotFinalized") || eText.includes("0x1775")) {
+      console.log(`  ↳ EE round ${nextEeId} was cancelled — skipping aggregate`);
     } else { throw e; }
   }
 

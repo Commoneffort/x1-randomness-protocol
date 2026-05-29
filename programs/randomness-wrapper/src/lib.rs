@@ -239,6 +239,16 @@ impl ValidatorReveal {
     pub const INIT_SPACE: usize = 8 + 32 + 32 + 8 + 1 + 1;
 }
 
+/// Idempotency guard for mark_validator_missed: one record per (EE round, validator identity).
+/// Seeds: [b"miss-record", ee_round_pubkey, identity]
+#[account]
+pub struct ValidatorMissRecord {
+    pub bump: u8,
+}
+impl ValidatorMissRecord {
+    pub const INIT_SPACE: usize = 8 + 1; // disc(8) + bump(1)
+}
+
 /// On-chain record for a registered protocol validator.
 /// Seeds: [b"val-reg", identity.key()]
 #[account]
@@ -548,6 +558,8 @@ pub struct RefreshValidatorStatus<'info> {
 
 /// Permissionless — called after a round finalises to penalise validators who
 /// were part of the active set but did not reveal (no ValidatorReveal PDA exists).
+/// The miss_record PDA is created per-(validator, EE round) to enforce idempotency:
+/// calling this twice for the same round/validator fails because the PDA already exists.
 #[derive(Accounts)]
 pub struct MarkValidatorMissed<'info> {
     #[account(
@@ -563,7 +575,20 @@ pub struct MarkValidatorMissed<'info> {
     /// CHECK: ValidatorReveal PDA that would exist if this validator revealed.
     /// Must be passed as the expected PDA address; we verify it does NOT exist.
     pub expected_reveal_pda: AccountInfo<'info>,
+    /// Idempotency guard — created once per (validator, EE round). Anchor's init
+    /// constraint rejects the transaction if this PDA already exists, preventing
+    /// spam-deactivation via repeated calls with the same round.
+    #[account(
+        init,
+        payer = caller,
+        space = ValidatorMissRecord::INIT_SPACE,
+        seeds = [b"miss-record", ee_round.key().as_ref(), validator_registration.identity.as_ref()],
+        bump,
+    )]
+    pub miss_record: Account<'info, ValidatorMissRecord>,
+    #[account(mut)]
     pub caller: Signer<'info>,
+    pub system_program: Program<'info, System>,
 }
 
 /// CPI: Initialize an EE V4 round via the wrapper.
@@ -608,6 +633,14 @@ pub struct InitEeRound<'info> {
     pub coordinator_vote: AccountInfo<'info>,
     /// CHECK: Coordinator's stake account — live stake checked in handler.
     pub coordinator_stake: AccountInfo<'info>,
+    /// Fee escrow for the current protocol round — stamped with this EE round ID
+    /// so refund_request can verify the correct EE round for cancelled-round refunds.
+    #[account(
+        mut,
+        seeds = [b"fee-escrow", &protocol_config.current_round.to_le_bytes()],
+        bump = fee_escrow.bump,
+    )]
+    pub fee_escrow: Account<'info, FeeEscrow>,
     pub system_program: Program<'info, System>,
     /// CHECK: Must be the canonical EntropyEngine V4 program.
     #[account(address = ENTROPY_ENGINE_V4 @ RandomnessError::Unauthorized)]
@@ -666,6 +699,8 @@ pub struct CommitViaEe<'info> {
 
 /// CPI: Reveal to an EE V4 round via the wrapper.
 /// Creates a ValidatorReveal PDA so this contributor can later claim their fee share.
+/// The PDA is seeded by x1_randomness_authority (not contributor.key()) so that
+/// mark_validator_missed always knows the correct address regardless of which key signed.
 #[derive(Accounts)]
 pub struct RevealViaEe<'info> {
     #[account(
@@ -685,12 +720,21 @@ pub struct RevealViaEe<'info> {
         init,
         payer = contributor,
         space = ValidatorReveal::INIT_SPACE,
-        seeds = [b"validator-reveal", ee_round.key().as_ref(), contributor.key().as_ref()],
+        seeds = [b"validator-reveal", ee_round.key().as_ref(), validator_reg.x1_randomness_authority.as_ref()],
         bump,
     )]
     pub validator_reveal: Account<'info, ValidatorReveal>,
     #[account(mut)]
     pub contributor: Signer<'info>,
+    /// Contributor's registration — enforces that contributor == x1_randomness_authority,
+    /// keeping the ValidatorReveal PDA address consistent with mark_validator_missed.
+    #[account(
+        seeds = [b"val-reg", validator_reg.identity.as_ref()],
+        bump = validator_reg.bump,
+        constraint = validator_reg.active @ RandomnessError::ValidatorInactive,
+        constraint = validator_reg.x1_randomness_authority == contributor.key() @ RandomnessError::Unauthorized,
+    )]
+    pub validator_reg: Account<'info, ValidatorRegistration>,
     pub system_program: Program<'info, System>,
     /// CHECK: Must be the canonical EntropyEngine V4 program.
     #[account(address = ENTROPY_ENGINE_V4 @ RandomnessError::Unauthorized)]
@@ -957,6 +1001,34 @@ pub struct GameSeed<'info> {
     pub system_program: Program<'info, System>,
 }
 
+/// Permissionless crank: fulfills a queue-path RequestState that was created when the
+/// pool was stale. Once the pool is warm again, anyone can call this to deliver the
+/// entropy output and unlock the request (enabling close_request to reclaim rent).
+#[derive(Accounts)]
+pub struct FulfillQueuedRequest<'info> {
+    #[account(
+        mut,
+        constraint = !request_state.fulfilled @ RandomnessError::RoundAlreadyAggregated,
+    )]
+    pub request_state: Account<'info, RequestState>,
+    #[account(
+        mut,
+        seeds = [b"entropy-pool"],
+        bump = entropy_pool.bump,
+        constraint = entropy_pool.entropy_available @ RandomnessError::EntropyPoolNotAvailable,
+    )]
+    pub entropy_pool: Account<'info, EntropyPool>,
+    #[account(
+        seeds = [b"protocol-config"],
+        bump = protocol_config.bump,
+    )]
+    pub protocol_config: Account<'info, ProtocolConfig>,
+    /// CHECK: SlotHashes sysvar — mixed into output for unpredictability.
+    #[account(address = anchor_lang::solana_program::sysvar::slot_hashes::ID)]
+    pub slot_hashes: AccountInfo<'info>,
+    pub caller: Signer<'info>,
+}
+
 /// One-time migration: expands the pre-V4.3 EntropyPool from 67 → 75 bytes to add
 /// the `total_game_seeds` counter. Permissionless and idempotent — safe to call twice.
 #[derive(Accounts)]
@@ -1079,6 +1151,7 @@ pub struct UpdateDappFee<'info> {
 pub struct ClaimValidatorReward<'info> {
     #[account(
         mut,
+        close = contributor,
         seeds = [b"validator-reveal", validator_reveal.ee_round.as_ref(), contributor.key().as_ref()],
         bump = validator_reveal.bump,
         constraint = !validator_reveal.claimed @ RandomnessError::RewardAlreadyClaimed,
@@ -1464,6 +1537,8 @@ pub mod randomness_wrapper {
         ctx: Context<RotateRandomnessAuthority>,
         new_authority: Pubkey,
     ) -> Result<()> {
+        require!(new_authority != Pubkey::default(), RandomnessError::Unauthorized);
+        require!(new_authority != anchor_lang::solana_program::system_program::id(), RandomnessError::Unauthorized);
         ctx.accounts.validator_registration.x1_randomness_authority = new_authority;
         msg!("Rotated x1_randomness_authority for {} to {}", ctx.accounts.identity.key(), new_authority);
         Ok(())
@@ -1547,19 +1622,21 @@ pub mod randomness_wrapper {
         );
 
         // Derive the expected ValidatorReveal PDA on-chain — attacker cannot fake this.
-        // Use x1_randomness_authority as the signer seed: it equals identity for non-rotated
-        // validators (safe default after migration) and equals the hot key after rotation,
-        // matching what commit_via_ee/reveal_via_ee enforce as the contributor signer.
-        let (expected_pda, _) = Pubkey::find_program_address(
-            &[
-                b"validator-reveal",
-                ctx.accounts.ee_round.key().as_ref(),
-                ctx.accounts.validator_registration.x1_randomness_authority.as_ref(),
-            ],
+        // reveal_via_ee now enforces contributor == x1_randomness_authority, so both
+        // the PDA seed and this derivation always use the same key.
+        let reg = &ctx.accounts.validator_registration;
+        let (expected_pda_hot, _) = Pubkey::find_program_address(
+            &[b"validator-reveal", ctx.accounts.ee_round.key().as_ref(), reg.x1_randomness_authority.as_ref()],
             ctx.program_id,
         );
+        // Also accept identity-seeded PDA for reveals made before V4.7 upgrade.
+        let (expected_pda_identity, _) = Pubkey::find_program_address(
+            &[b"validator-reveal", ctx.accounts.ee_round.key().as_ref(), reg.identity.as_ref()],
+            ctx.program_id,
+        );
+        let pda_key = ctx.accounts.expected_reveal_pda.key();
         require!(
-            ctx.accounts.expected_reveal_pda.key() == expected_pda,
+            pda_key == expected_pda_hot || pda_key == expected_pda_identity,
             RandomnessError::Unauthorized
         );
 
@@ -1568,6 +1645,8 @@ pub mod randomness_wrapper {
             ctx.accounts.expected_reveal_pda.lamports() == 0,
             RandomnessError::Unauthorized // PDA exists → they did reveal, not a miss
         );
+
+        ctx.accounts.miss_record.bump = ctx.bumps.miss_record;
 
         let reg = &mut ctx.accounts.validator_registration;
         reg.consecutive_misses = reg.consecutive_misses.saturating_add(1);
@@ -1686,6 +1765,10 @@ pub mod randomness_wrapper {
 
         // Update protocol config to track current EE V4 round
         ctx.accounts.protocol_config.ee_v4_round_id = ee_round_id;
+
+        // Stamp the fee escrow with the correct EE round ID so refund_request can
+        // validate against the right round if it gets cancelled.
+        ctx.accounts.fee_escrow.ee_v4_round_id = ee_round_id;
 
         Ok(())
     }
@@ -1867,8 +1950,10 @@ pub mod randomness_wrapper {
         })?;
 
         // Record this contributor's reveal so they can claim their share of round fees.
+        // contributor is stored as x1_randomness_authority (matches the PDA seed and
+        // the address claim_validator_reward and mark_validator_missed expect).
         let vr = &mut ctx.accounts.validator_reveal;
-        vr.contributor = ctx.accounts.contributor.key();
+        vr.contributor = ctx.accounts.validator_reg.x1_randomness_authority;
         vr.ee_round = ctx.accounts.ee_round.key();
         vr.protocol_round = ctx.accounts.protocol_config.current_round;
         vr.claimed = false;
@@ -2292,6 +2377,12 @@ pub mod randomness_wrapper {
 
     pub fn game_seed(ctx: Context<GameSeed>, game_id: [u8; 32]) -> Result<[u8; 32]> {
         require!(ctx.accounts.entropy_pool.entropy_available, RandomnessError::EntropyPoolNotAvailable);
+        // Reject stale pool — same threshold as request_randomness fast path.
+        // Without this, a watcher who knows the public pool entropy can precompute
+        // game_seed outputs by trying all remaining slot hashes in the sysvar window.
+        let slots_since_agg = Clock::get()?.slot
+            .saturating_sub(ctx.accounts.entropy_pool.last_aggregated_slot);
+        require!(slots_since_agg <= STALENESS_HARD_LIMIT_SLOTS, RandomnessError::EntropyPoolNotAvailable);
 
         // Collect game seed fee into the current round's escrow.
         anchor_lang::system_program::transfer(
@@ -2331,6 +2422,34 @@ pub mod randomness_wrapper {
         });
 
         Ok(output)
+    }
+
+    /// Fulfill a queue-path request that was created when the entropy pool was stale.
+    /// Permissionless — anyone can call this once the pool is warm again.
+    /// Produces the same output formula as the fast path:
+    ///   SHA256(pool_entropy ‖ request_id ‖ slot_hash_NOW)
+    pub fn fulfill_queued_request(ctx: Context<FulfillQueuedRequest>) -> Result<()> {
+        let slots_since_agg = Clock::get()?.slot
+            .saturating_sub(ctx.accounts.entropy_pool.last_aggregated_slot);
+        require!(slots_since_agg <= STALENESS_HARD_LIMIT_SLOTS, RandomnessError::EntropyPoolNotAvailable);
+
+        let slot_hash = read_slot_hash(&ctx.accounts.slot_hashes)?;
+        let output = hash(
+            &[
+                &ctx.accounts.entropy_pool.current_entropy[..],
+                &ctx.accounts.request_state.request_id[..],
+                &slot_hash[..],
+            ].concat()
+        ).to_bytes();
+
+        let request = &mut ctx.accounts.request_state;
+        request.fulfilled = true;
+        request.output = output;
+
+        ctx.accounts.entropy_pool.total_requests_served = ctx.accounts.entropy_pool.total_requests_served
+            .checked_add(1).ok_or(error!(RandomnessError::Overflow))?;
+
+        Ok(())
     }
 
     /// One-time migration: expands EntropyPool from 67 → 75 bytes (adds total_game_seeds).

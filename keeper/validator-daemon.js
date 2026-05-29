@@ -308,14 +308,16 @@ function ixCommit(eeRoundId, eeRound, voteAccount, stakeAccount, commitment) {
 function ixReveal(eeRoundId, eeRound, secret, nonce) {
   const [cfg] = cfgPda();
   const [wr]  = wrapperPda(eeRoundId);
-  const [vr]  = vrPda(eeRound, hotKey.publicKey); // vr seeded by contributor = hot key after rotation
+  const [vr]  = vrPda(eeRound, hotKey.publicKey); // vr seeded by x1_randomness_authority = hot key
+  const [reg] = valRegPda(identityPubkey);
   return new TransactionInstruction({ programId: PROGRAM_ID,
     keys: [
       { pubkey: cfg,                     isSigner: false, isWritable: false },
       { pubkey: wr,                      isSigner: false, isWritable: false },
       { pubkey: eeRound,                 isSigner: false, isWritable: true  },
       { pubkey: vr,                      isSigner: false, isWritable: true  },
-      { pubkey: hotKey.publicKey,        isSigner: true,  isWritable: true  }, // contributor
+      { pubkey: hotKey.publicKey,        isSigner: true,  isWritable: true  }, // contributor = x1_randomness_authority
+      { pubkey: reg,                     isSigner: false, isWritable: false }, // validator_reg: enforces contributor == x1_randomness_authority
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       { pubkey: EE_V4,                   isSigner: false, isWritable: false },
     ],
@@ -328,11 +330,12 @@ function ixReveal(eeRoundId, eeRound, secret, nonce) {
 // protocol constants derived on-chain.
 // coordinatorKey is the signer (identity in full mode, hotKey in hot-key-only mode).
 // val-reg PDA always uses identityPubkey regardless of which key signs.
-function ixInitEeRound(coordinatorKey, coordinatorVote, coordinatorStake, eeRoundId) {
+function ixInitEeRound(coordinatorKey, coordinatorVote, coordinatorStake, eeRoundId, protocolRound) {
   const [cfg] = cfgPda();
   const [wr]  = wrapperPda(eeRoundId);
   const [eer] = eeRoundPda(coordinatorKey, eeRoundId);
   const [reg] = valRegPda(identityPubkey);  // always cold identity — PDA seed is identity, not hot key
+  const [escrow] = escrowPda(protocolRound); // stamped with eeRoundId so refund_request works for cancelled rounds
   return {
     ix: new TransactionInstruction({ programId: PROGRAM_ID,
       keys: [
@@ -343,6 +346,7 @@ function ixInitEeRound(coordinatorKey, coordinatorVote, coordinatorStake, eeRoun
         { pubkey: reg,                     isSigner: false, isWritable: false },
         { pubkey: coordinatorVote,         isSigner: false, isWritable: false },
         { pubkey: coordinatorStake,        isSigner: false, isWritable: false },
+        { pubkey: escrow,                  isSigner: false, isWritable: true },
         { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
         { pubkey: EE_V4,                   isSigner: false, isWritable: false },
       ],
@@ -457,12 +461,13 @@ async function runOnce() {
     return;
   }
 
-  // Check eligibility for this round
-  if (!isEligible(poolEntropy, eeV4RoundId, identityPubkey)) {
-    console.log(`  Not selected for EE round ${eeV4RoundId} this cycle — waiting for next round`);
-    return;
+  // Eligibility check gates only the commit action, not round lifecycle management.
+  const eligible = isEligible(poolEntropy, eeV4RoundId, identityPubkey);
+  if (eligible) {
+    console.log(`  Selected for EE round ${eeV4RoundId}`);
+  } else {
+    console.log(`  Not selected for EE round ${eeV4RoundId} — will still manage round lifecycle`);
   }
-  console.log(`  Selected for EE round ${eeV4RoundId}`);
 
   // Find EE round PDA — scan EE_V4 program accounts filtered by round_id at offset 40.
   // The EE round PDA seeds are ["round", coordinator, round_id_le8], but coordinator
@@ -479,7 +484,7 @@ async function runOnce() {
     const initCoordKey    = hotKeyOnlyMode ? hotKey.publicKey : identityPubkey;
     const initCoordSigner = hotKeyOnlyMode ? hotKey : identity;
     console.log(`  EE round ${eeV4RoundId} not initialised — calling init_ee_round as coordinator`);
-    const { ix: initIx, eeRoundPubkey: newEeRoundPubkey } = ixInitEeRound(initCoordKey, voteAccount, stakeAccount, eeV4RoundId);
+    const { ix: initIx, eeRoundPubkey: newEeRoundPubkey } = ixInitEeRound(initCoordKey, voteAccount, stakeAccount, eeV4RoundId, currentRound);
     try {
       await send(initIx, `init_ee_round(id=${eeV4RoundId})`, [initCoordSigner]);
       eeRoundCache.set(eeV4RoundId, newEeRoundPubkey);
@@ -544,8 +549,9 @@ async function runOnce() {
     console.log("  EE round account too small / unreadable");
     return;
   }
-  const commitDeadline = Number(eeAcct.data.readBigUInt64LE(50));
-  const bindingSlot    = Number(eeAcct.data.readBigUInt64LE(66));
+  const commitDeadline  = Number(eeAcct.data.readBigUInt64LE(50));
+  const revealDeadline  = Number(eeAcct.data.readBigUInt64LE(58)); // offset 58: reveals must land before this slot
+  const bindingSlot     = Number(eeAcct.data.readBigUInt64LE(66));
 
   // ── Commit phase ────────────────────────────────────────────────────────────
   const [vrAddr] = vrPda(eeRoundPubkey, hotKey.publicKey); // VR PDA uses contributor = hot key after rotation
@@ -554,9 +560,10 @@ async function runOnce() {
 
   const cur = await conn.getSlot("confirmed");
   const beforeCommitDeadline = cur < commitDeadline;
+  const inRevealWindow       = cur >= commitDeadline && cur < revealDeadline;
   const pastBinding          = cur >= bindingSlot;
 
-  if (beforeCommitDeadline && !revealed) {
+  if (beforeCommitDeadline && !revealed && eligible) {
     // Re-read config to catch cases where another validator advanced the round mid-cycle
     const freshCfg = (await conn.getAccountInfo(cfgAddr)).data;
     const freshEeId = readU64(freshCfg, 88);
@@ -699,7 +706,7 @@ async function runOnce() {
           const nextCoordKey    = hotKeyOnlyMode ? hotKey.publicKey : identityPubkey;
           const nextCoordSigner = hotKeyOnlyMode ? hotKey : identity;
           console.log(`  EE round ${eeV4RoundId} done (status=${eeStatus}) — opening next EE round ${nextEeId}`);
-          const { ix: initIx, eeRoundPubkey: newEeRoundPubkey } = ixInitEeRound(nextCoordKey, voteAccount, stakeAccount, nextEeId);
+          const { ix: initIx, eeRoundPubkey: newEeRoundPubkey } = ixInitEeRound(nextCoordKey, voteAccount, stakeAccount, nextEeId, currentRound);
           try {
             await send(initIx, `init_ee_round(id=${nextEeId})`, [nextCoordSigner]);
             eeRoundCache.set(nextEeId, newEeRoundPubkey);
@@ -735,12 +742,14 @@ async function runOnce() {
 
   // ── Reveal phase ────────────────────────────────────────────────────────────
   // Only attempt reveal when:
-  //   - past commit_deadline (RevealPhase has started)
-  //   - before binding_slot (reveal_deadline = init+600 < binding_slot = init+675)
+  //   - inside the reveal window (commit_deadline ≤ cur < reveal_deadline at offset 58)
   //   - EE round status is RevealPhase (1)
-  // Attempting reveal past binding_slot always fails (reveal window closed).
-  const eeRoundStatus = eeAcct.data[140];
-  if (!beforeCommitDeadline && !pastBinding && !revealed && eeRoundStatus === 1) {
+  // Using reveal_deadline (not binding_slot) prevents failed reveals in the
+  // ~75-slot gap between reveal_deadline and binding_slot.
+  // Re-read eeAcct here to get a fresh status after the potentially long commit section.
+  const freshEeAcct   = await conn.getAccountInfo(eeRoundPubkey);
+  const eeRoundStatus = freshEeAcct?.data[140] ?? eeAcct.data[140];
+  if (inRevealWindow && !revealed && eeRoundStatus === 1) {
     const secrets = loadSecrets(eeV4RoundId);
     if (!secrets) {
       console.log("  In reveal window but no secrets found — missed commit phase");
@@ -775,8 +784,8 @@ async function runOnce() {
     clearSecrets();
   }
 
-  // Clear stale secrets if round is cancelled or still in CommitPhase past deadline
-  if (!beforeCommitDeadline && !revealed && eeRoundStatus !== 1) {
+  // Clear stale secrets when reveal window has closed and the round is no longer in RevealPhase
+  if (!inRevealWindow && !revealed && eeRoundStatus !== 1) {
     console.log(`  EE round ${eeV4RoundId} status=${eeRoundStatus} — cannot reveal, clearing stale secrets`);
     clearSecrets();
   }
