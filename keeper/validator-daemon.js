@@ -633,14 +633,15 @@ async function runOnce() {
   // ── Init next EE round ───────────────────────────────────────────────────────
   // Open the next EE round when the current one is done. "Done" means:
   //   - Finalized (status=2) or Cancelled (status=3), OR
-  //   - Stuck in RevealPhase (status=1) with binding slot hash expired — the EE
-  //     program's finalize requires the binding slot hash from SlotHashes sysvar
-  //     which only holds ~512 entries. If cur > binding_slot + 512, finalization
-  //     is permanently impossible and we must abandon the round.
+  //   - Stuck in RevealPhase (status=1) or CommitPhase (status=0) with slot hash
+  //     expired (cur > binding_slot + 512) — finalization is permanently impossible
+  //     and we must abandon. For CommitPhase, we attempt cancel_round first to
+  //     return committed stakes; if that fails or we're not the coordinator, we
+  //     proceed anyway to keep the protocol live.
   if (pastBinding) {
     const eeStatus = eeAcct.data[140]; // 0=CommitPhase, 1=RevealPhase, 2=Finalized, 3=Cancelled
     const slotHashExpired = cur > bindingSlot + 512;
-    const roundDone = eeStatus === 2 || eeStatus === 3 || (eeStatus === 1 && slotHashExpired);
+    const roundDone = eeStatus === 2 || eeStatus === 3 || (eeStatus === 1 && slotHashExpired) || (eeStatus === 0 && slotHashExpired);
 
     // CommitPhase (status=0) past the binding slot is irrecoverable — not enough validators
     // committed to transition to RevealPhase. The coordinator must call cancel_round.
@@ -670,16 +671,23 @@ async function runOnce() {
         }
       } else if (coordinator.equals(identityPubkey) && hotKeyOnlyMode) {
         // We opened this round with the identity key on another server — cannot cancel from here.
-        console.log(`  ⚠ EE round ${eeV4RoundId} stuck in CommitPhase (${commitCount} commits) — we are coordinator but identity key is on the validator server. Run cancel-ee-round.js there.`);
+        console.log(`  ⚠ EE round ${eeV4RoundId} stuck in CommitPhase (${commitCount} commits) — we are coordinator but identity key is on the validator server.${slotHashExpired ? " Slot hash expired, abandoning." : " Run cancel-ee-round.js there."}`);
       } else {
-        console.log(`  ⚠ EE round ${eeV4RoundId} stuck in CommitPhase (${commitCount} commits) past binding slot — waiting for coordinator (${coordinator.toBase58().slice(0,8)}…) to call cancel_round`);
+        if (slotHashExpired) {
+          console.log(`  ⚠ EE round ${eeV4RoundId} stuck in CommitPhase (${commitCount} commits) — slot hash expired, coordinator (${coordinator.toBase58().slice(0,8)}…) did not cancel; abandoning to keep protocol live`);
+        } else {
+          console.log(`  ⚠ EE round ${eeV4RoundId} stuck in CommitPhase (${commitCount} commits) past binding slot — waiting for coordinator (${coordinator.toBase58().slice(0,8)}…) to call cancel_round`);
+        }
       }
-      return;
+      if (!slotHashExpired) return;
+      // Slot hash expired — fall through to roundDone path to open next round.
     }
 
     if (roundDone) {
       if (eeStatus === 1 && slotHashExpired) {
         console.log(`  EE round ${eeV4RoundId} stuck in RevealPhase — binding slot hash expired, abandoning`);
+      } else if (eeStatus === 0 && slotHashExpired) {
+        console.log(`  EE round ${eeV4RoundId} stuck in CommitPhase — binding slot hash expired, abandoning`);
       }
       const nextEeId = eeV4RoundId + 1;
       const [nextEeWrAddr] = wrapperPda(nextEeId);
