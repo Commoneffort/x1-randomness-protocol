@@ -4,7 +4,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { useX1Wallet, useConnection } from "@/lib/X1WalletContext";
 import { PublicKey, Transaction, TransactionInstruction, SystemProgram } from "@solana/web3.js";
 import { ProtocolClient, ValidatorReveal, FeeEscrow, ValidatorRegistration } from "@/lib/protocol";
-import { PROGRAM_ID, EE_V4_STAKE_LAMPORTS, FEE_VALIDATORS_PCT, DISC, ACCT_DISC, MIN_VALIDATOR_STAKE_XNT, VALIDATOR_MAX_INACTIVE_SLOTS, MIN_COMMITTEE_SIZE, VALIDATOR_MAX_CONSECUTIVE_MISSES, EE_V4_N_CONTRIBUTORS, EE_V4_M_THRESHOLD } from "@/lib/constants";
+import { PROGRAM_ID, EE_V4_STAKE_LAMPORTS, FEE_VALIDATORS_PCT, DISC, ACCT_DISC, MIN_VALIDATOR_STAKE_XNT, VALIDATOR_MAX_INACTIVE_SLOTS, MIN_COMMITTEE_SIZE, VALIDATOR_MAX_CONSECUTIVE_MISSES, EE_V4_N_CONTRIBUTORS, EE_V4_M_THRESHOLD, ROUND_STATS_BASELINE_ROUND } from "@/lib/constants";
 import { findFeeEscrowPda, findValRegPda } from "@/lib/pdas";
 
 export default function ValidatorsPage() {
@@ -66,8 +66,9 @@ export default function ValidatorsPage() {
       } else {
         setMyReg(undefined);
       }
-      // Fetch round health stats asynchronously — don't block registry display
-      client.getAllWrapperRoundStats(slot).then(setRoundStats).catch(() => {});
+      // Fetch round health stats asynchronously — don't block registry display.
+      // sinceRound baseline excludes all historical rounds that pre-date this metric.
+      client.getAllWrapperRoundStats(slot, ROUND_STATS_BASELINE_ROUND).then(setRoundStats).catch(() => {});
     } finally {
       setRegistryLoading(false);
     }
@@ -284,7 +285,8 @@ export default function ValidatorsPage() {
 
       {/* Round health — cancelled / orphaned round tracking */}
       <div className="card">
-        <h2 className="text-lg font-semibold text-text-primary mb-3">Round Health</h2>
+        <h2 className="text-lg font-semibold text-text-primary mb-1">Round Health</h2>
+        <p className="text-xs text-text-muted mb-3">Since round {ROUND_STATS_BASELINE_ROUND.toLocaleString()} (2026-05-29) — historical rounds excluded</p>
         {roundStats === null ? (
           <div className="flex items-center gap-2 text-text-muted text-sm">
             <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary" />

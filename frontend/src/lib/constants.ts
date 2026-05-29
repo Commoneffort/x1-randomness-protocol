@@ -53,6 +53,11 @@ export const ACCT_DISC = {
   ValidatorRegistration:  Buffer.from([8,207,107,171,248,66,249,38]),
 };
 
+// Round health baseline — only count rounds from this point forward for failed/success metrics.
+// Set to the protocol round at the time of the 2026-05-29 frontend deployment.
+// Historical rounds before this had unrelated infra issues and would skew the success rate.
+export const ROUND_STATS_BASELINE_ROUND = 2383;
+
 // Validator registry constants
 export const MIN_VALIDATOR_STAKE_XNT = 1000;
 export const MIN_VALIDATOR_STAKE_LAMPORTS = MIN_VALIDATOR_STAKE_XNT * 1_000_000_000;

@@ -422,8 +422,10 @@ export class ProtocolClient {
   }
 
   // Returns total, successful, and failed (non-aggregated and old) WrapperRound counts.
-  // Uses dataSlice to minimise data transfer — only fetches startSlot + aggregated (9 bytes).
-  async getAllWrapperRoundStats(currentSlot: number): Promise<{ total: number; failed: number; successful: number }> {
+  // sinceRound: only count rounds >= this number (use ROUND_STATS_BASELINE_ROUND to exclude
+  // historical rounds that pre-date the metric being tracked).
+  // Uses dataSlice to minimise data transfer — only fetches round + startSlot + aggregated (25 bytes).
+  async getAllWrapperRoundStats(currentSlot: number, sinceRound = 0): Promise<{ total: number; failed: number; successful: number }> {
     try {
       const disc = ACCT_DISC.WrapperRound;
       const accounts = await this.connection.getProgramAccounts(
@@ -431,20 +433,23 @@ export class ProtocolClient {
         {
           commitment: "confirmed",
           filters: [{ memcmp: { offset: 0, bytes: bs58.encode(disc) } }],
-          dataSlice: { offset: 24, length: 9 }, // startSlot (u64, 8 bytes) + aggregated (bool, 1 byte)
+          dataSlice: { offset: 8, length: 25 }, // round (u64,8) + eeV4RoundId (u64,8) + startSlot (u64,8) + aggregated (bool,1)
         }
       );
-      let failed = 0;
+      let total = 0, failed = 0;
       for (const a of accounts) {
         const d = Buffer.from(a.account.data);
-        if (d.length < 9) continue;
-        const startSlot = Number(d.readBigUInt64LE(0)); // dataSlice offset 0 = original offset 24
-        const aggregated = d[8] !== 0;                  // dataSlice offset 8 = original offset 32
-        // A round is definitively failed when it is non-aggregated and too old to still be in progress.
+        if (d.length < 25) continue;
+        const round      = Number(d.readBigUInt64LE(0));  // original offset 8
+        const startSlot  = Number(d.readBigUInt64LE(16)); // original offset 24
+        const aggregated = d[24] !== 0;                   // original offset 32
+        if (round < sinceRound) continue;
+        total++;
+        // A round is definitively failed when non-aggregated and too old to still be in progress.
         // Max round duration: commit (200) + reveal (600) + binding (675) + expiry grace (512) ≈ 2000 slots.
         if (!aggregated && startSlot < currentSlot - 2000) failed++;
       }
-      return { total: accounts.length, failed, successful: accounts.length - failed };
+      return { total, failed, successful: total - failed };
     } catch {
       return { total: 0, failed: 0, successful: 0 };
     }
