@@ -479,7 +479,6 @@ async function runOnce() {
     const initCoordKey    = hotKeyOnlyMode ? hotKey.publicKey : identityPubkey;
     const initCoordSigner = hotKeyOnlyMode ? hotKey : identity;
     console.log(`  EE round ${eeV4RoundId} not initialised — calling init_ee_round as coordinator`);
-    try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status"); } catch (_) {}
     const { ix: initIx, eeRoundPubkey: newEeRoundPubkey } = ixInitEeRound(initCoordKey, voteAccount, stakeAccount, eeV4RoundId);
     try {
       await send(initIx, `init_ee_round(id=${eeV4RoundId})`, [initCoordSigner]);
@@ -692,7 +691,6 @@ async function runOnce() {
           const nextCoordKey    = hotKeyOnlyMode ? hotKey.publicKey : identityPubkey;
           const nextCoordSigner = hotKeyOnlyMode ? hotKey : identity;
           console.log(`  EE round ${eeV4RoundId} done (status=${eeStatus}) — opening next EE round ${nextEeId}`);
-          try { await send(ixRefreshValidatorStatus(voteAccount, stakeAccount), "refresh_validator_status"); } catch (_) {}
           const { ix: initIx, eeRoundPubkey: newEeRoundPubkey } = ixInitEeRound(nextCoordKey, voteAccount, stakeAccount, nextEeId);
           try {
             await send(initIx, `init_ee_round(id=${nextEeId})`, [nextCoordSigner]);
