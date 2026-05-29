@@ -14,10 +14,14 @@
 | Anchor program (`lib.rs`) — V4.2 | 9 | 9 | ✅ FIXED |
 | Anchor program (`lib.rs`) — V4.3 | 3 | 3 | ✅ FIXED |
 | Anchor program (`lib.rs`) — V4.6 | 6 | 6 | ✅ FIXED |
-| Keeper crank (`run-round.js`) | 2 | 2 | ✅ FIXED |
+| Anchor program (`lib.rs`) — V4.7 | 6 | 6 | ✅ FIXED |
+| Keeper crank (`run-round.js`) — V4.2 | 2 | 2 | ✅ FIXED |
+| Keeper crank (`run-round.js`) — V4.7 | 2 | 2 | ✅ FIXED |
 | Validator daemon (`validator-daemon.js`) — V4.2 | 2 | 2 | ✅ FIXED |
 | Validator daemon (`validator-daemon.js`) — V4.3 | 3 | 3 | ✅ FIXED |
 | Validator daemon (`validator-daemon.js`) — V4.6 | 4 | 4 | ✅ FIXED |
+| Validator daemon (`validator-daemon.js`) — V4.7 | 4 | 4 | ✅ FIXED |
+| Cancel script (`cancel-ee-round.js`) — V4.7 | 1 | 1 | ✅ FIXED |
 | Tests (`mainnet-e2e.js`) — V4.6 | 3 | 3 | ✅ FIXED |
 | Tests (`mainnet-e2e.js`) — V4.2/V4.3 | 2 | 2 | ✅ FIXED |
 | Frontend library (`protocol.ts`) — V4.3 | 1 | 1 | ✅ FIXED |
@@ -36,6 +40,7 @@
 | README.md — V4/V4.3 | 7 | 7 | ✅ FIXED |
 | README.md — V4.6 | 7 | 7 | ✅ FIXED |
 | Obsolete file (`validator-daemon.ts`) | 1 | 0 | ⚠️ PRESENT |
+| Open: `FeeEscrow` no close path after distribution — V4.7 | 1 | 0 | ⚠️ DEFERRED |
 
 **Total V4 audit:** 29 issues found, 28 fixed, 1 non-critical leftover.  
 **Total V4.2 audit:** 15 additional issues found, 15 fixed.  
@@ -43,7 +48,8 @@
 **Total V4.6 audit:** 33 additional issues found, 33 fixed (13 program/daemon/tests + 20 frontend/docs).  
 **Piotr's external audit (2026-05-27) — 2 issues, 2 fixed:** StakeDeactivating error propagation (program + daemon) fixed in post-V4.6 patch; stale daemon comment corrected.  
 **Post-V4.6 patch audit (2026-05-27) — 16 issues, 16 fixed:** Hot-key-only daemon mode completion (6 daemon issues), docs/fee economics stale "protocol authority" text, eligibility hash formula in security section, validator credential binding description, FAQ update, README separate-server setup, CLAUDE.md env vars, AUDIT.md stale references.  
-**Complete repo audit (2026-05-27) — 4 issues found, 4 fixed:** Dead `ixClaimReward` function removed; unused `totalUnclaimed` variable removed; all-hot-key-only protocol stall documented in CLAUDE.md; stale test account lists noted (test-only, no production impact).
+**Complete repo audit (2026-05-27) — 4 issues found, 4 fixed:** Dead `ixClaimReward` function removed; unused `totalUnclaimed` variable removed; all-hot-key-only protocol stall documented in CLAUDE.md; stale test account lists noted (test-only, no production impact).  
+**V4.7 full security audit (2026-05-29) — 15 issues found, 14 fixed, 1 deferred:** Critical `hasFees()` offset bug locking all validator rewards; `mark_validator_missed` spam-deactivation attack (no idempotency); false deactivation after hot-key rotation; orphaned queue-path requests; cancelled-round refunds blocked; crank stall on cancelled EE rounds; reveal window off-by-75-slots; eligibility gate blocking lifecycle; `game_seed` staleness; hot-key authority validation; rent leak on `ValidatorReveal`. Deferred: `FeeEscrow` no close path after distribution.
 
 ---
 
@@ -550,3 +556,328 @@ The production daemon `ixCommit`, `ixReveal`, and `ixInitEeRound` have the corre
 ### Result: protocol flow is correct post hot-key-only implementation
 
 The hot-key-only mode implementation is sound. `identityPubkey` is used wherever the on-chain program uses `validator_reg.identity` (PDA seeds, eligibility check). `hotKey` is used wherever the program checks `x1_randomness_authority` (signing for commit/reveal/claim). The separation is enforced consistently in both the daemon and the Rust program.
+
+---
+
+## V4.7 Full Security Audit — 2026-05-29
+
+**Trigger:** Operator report of stuck rounds and unexplained XNT drain on validator hot keys. Multi-angle automated audit covering the full repository — Rust program, crank, validator daemon, cancel script, and frontend.
+
+**Audit method:** 9 independent automated finders (line-by-line diff, removed-behavior, cross-file callers, language pitfalls, economic attacks, validator selection logic, daemon lifecycle, gap sweep) × parallel agents. All findings verified before inclusion.
+
+**Program deployed:** V4.7 — `BSKTJpgAGHRaSMLA88chYPKuSuD9qbesEcHYmUrBWU7R`
+**Deploy tx:** `8T3xQASVC1mRwPaS82QUoKy6K9NQ1g6U2eTr78FPV4rtnXX6Z9PEgvbt39MS99yvrYeHJkL9WDhtMoGoFMnbh28`
+**Commit:** `8e33402`
+
+### Summary
+
+| Area | Issues Found | Fixed | Open |
+|------|-------------|-------|------|
+| Anchor program (`lib.rs`) | 8 | 7 | 1 |
+| Keeper crank (`run-round.js`) | 2 | 2 | 0 |
+| Validator daemon (`validator-daemon.js`) | 4 | 4 | 0 |
+| Cancel script (`cancel-ee-round.js`) | 1 | 1 | 0 |
+| **Total** | **15** | **14** | **1** |
+
+The summary table in the top-level header has been updated to reflect this audit.
+
+---
+
+### Anchor Program — V4.7 findings
+
+| ID | Severity | Instruction | Issue | Fix |
+|----|----------|-------------|-------|-----|
+| A7-C1 | **Critical** | `run-round.js hasFees()` | Read `original_fees` at byte offset 24, which is only written inside `distribute_fees` itself and is therefore always 0 before distribution. `hasFees()` always returned false. The crank skipped `distribute_fees` every round with "No fees (no requests this round)", leaving all validator rewards locked since commit `1753b1d`. | Changed `readBigUInt64LE(24)` to `readBigUInt64LE(8)` (`pending_fees`, set by every `request_randomness` call). |
+| A7-H1 | **High** | `mark_validator_missed` | No per-(validator, EE round) idempotency guard. All checks (binding_slot guard, EE round ownership, reveal PDA lamports==0) pass identically on repeated calls with the same accounts. An attacker could call the instruction 5 times in a single block to instantly deactivate any validator. Cost to attacker: gas only. | Added `ValidatorMissRecord` PDA (`seeds: [b"miss-record", ee_round, identity]`). Anchor `init` constraint rejects the instruction if the PDA already exists — one miss per (validator, round) enforced. Caller pays rent for the 9-byte record. |
+| A7-H2 | **High** | `reveal_via_ee` / `mark_validator_missed` | `reveal_via_ee` seeded `ValidatorReveal` PDA with `contributor.key()` (the actual signer), which could be identity OR hot key. `mark_validator_missed` derived the expected PDA using `x1_randomness_authority`. If a rotated validator called `reveal_via_ee` with their identity key (allowed by the constraint), the reveal PDA landed at `[identity]` but `mark_validator_missed` looked at `[x1_randomness_authority]` — different address, lamports==0, false miss recorded. After 5 rounds, validator deactivated. | `RevealViaEe` now requires `contributor.key() == validator_reg.x1_randomness_authority` (new `validator_reg` account enforces this). PDA seed changed to `x1_randomness_authority` — always deterministic. `mark_validator_missed` also accepts the identity-keyed PDA as a fallback to handle reveals made before this upgrade. `ValidatorReveal.contributor` now stores `x1_randomness_authority` (not the signer key). |
+| A7-H3 | **High** | `request_randomness` (queue path) | Queue-path `RequestState` accounts (`fulfilled=false`) created when the pool was stale had no fulfillment or recovery path once the EE round that serviced their protocol round completed successfully. `refund_request` requires `!fee_distributed` (blocked after success). `close_request` requires `fulfilled==true` (blocked). No `fulfill_queued_request` instruction existed. Requester paid the fee and received neither output nor refund — funds permanently trapped in the RequestState and escrow. | Added permissionless `fulfill_queued_request` instruction: delivers `SHA256(pool_entropy ‖ request_id ‖ slot_hash)` to any unfulfilled `RequestState` once the pool is warm and fresh (staleness guard matches fast path). Requester or any crank can call it. Increments `total_requests_served`. |
+| A7-M1 | **Medium** | `create_fee_escrow` / `refund_request` | `create_fee_escrow` stamped `fee_escrow.ee_v4_round_id` with `protocol_config.ee_v4_round_id` at creation time (the previous EE round ID, call it K). The EE round that actually services this protocol round is K+1 (opened by `init_ee_round`). If K+1 was cancelled, `aggregate_from_ee` never ran, so the escrow retained the stale ID K. `refund_request` required `ee_round_id_in_account == fee_escrow.ee_v4_round_id`, so K+1 ≠ K — refunds permanently blocked for all cancelled rounds. Queued user fees frozen with no recourse. | `init_ee_round` now stamps `fee_escrow.ee_v4_round_id = ee_round_id` at round-open time. Fee escrow immediately holds the correct EE round ID. `refund_request` now matches correctly when that round is cancelled. |
+| A7-M2 | **Medium** | `game_seed` | No pool staleness guard. `entropy_available` stays true indefinitely after first aggregation. A watcher who monitors the public `current_entropy` value can pre-compute all `game_seed` outputs for remaining slot hashes in the sysvar window once the pool is stale (>21,600 slots old), enabling outcome prediction and bet-timing attacks. `request_randomness` had a matching guard; `game_seed` did not. | Added staleness check: `slots_since_agg <= STALENESS_HARD_LIMIT_SLOTS` (21,600 slots) before computing output. Pool must be both available and fresh. |
+| A7-L1 | **Low** | `rotate_randomness_authority` | No validation on `new_authority`. Setting `new_authority = Pubkey::default()` (all-zeros) or `SystemProgram::id()` made `mark_validator_missed` always succeed (no one can create a reveal PDA seeded by these keys), effectively self-bricking the validator's miss-resistance. | Added `require!(new_authority != Pubkey::default() && new_authority != System::id())`. |
+| A7-L2 | **Low** | `claim_validator_reward` | `ValidatorReveal` PDA (82 bytes, ~0.00146 XNT rent) was never closed after claim — `claimed` was set to `true` but the account remained open with no close instruction. At 5 reveals/round × ~10 rounds/day, this permanently locked ~0.073 XNT/day across all validators with no reclaim path. | Added `close = contributor` to the `validator_reveal` account in `ClaimValidatorReward`. Rent returns to contributor on each successful claim. |
+
+**Open finding (not fixed — future upgrade):**
+
+| ID | Severity | Issue | Status |
+|----|----------|-------|--------|
+| A7-F1 | **Low** | `FeeEscrow` (42 bytes, ~0.001 XNT rent) can never be closed after `distribute_fees` sets `fee_distributed = true`. `close_escrow` requires `!fee_distributed`. The escrow must remain open until all validators have called `claim_validator_reward`, but no cleanup instruction exists afterward. Rent accumulates at ~0.01 XNT/day. Fix requires a `close_distributed_escrow` instruction gated on `pending_fees == 0 && fee_distributed == true`. Deferred — low cost per round; worth batching with next protocol upgrade. | Open |
+
+---
+
+### Keeper Crank — V4.7 findings (all fixed)
+
+| ID | Severity | Issue | Fix |
+|----|----------|-------|-----|
+| A7-C1 | Critical | `hasFees()` reads wrong offset — see program findings above. | Fixed in `run-round.js`. |
+| A7-M3 | **Medium** | `aggregate_from_ee` error handler caught only `"already"` and `"0x0"`. When called on a cancelled EE round (status=3), the program returns `EeV4RoundNotFinalized` — not caught — crank threw and entered an infinite retry loop every 30 seconds, blocking `advance_round` and all forward protocol progress indefinitely. | Added `"EeV4RoundNotFinalized"` and `"0x1775"` to the catch list in both step-1b and step-7. Cancelled rounds now log and continue rather than crashing. Applied to both occurrences in `runRound()`. |
+
+---
+
+### Validator Daemon — V4.7 findings (all fixed)
+
+| ID | Severity | Issue | Fix |
+|----|----------|-------|-----|
+| A7-M4 | **Medium** | `isEligible()` check at line 461 returned early from `runOnce()` for non-selected validators, preventing execution of all round lifecycle code (cancel stuck rounds, open next EE round, clear stale secrets, sweep rewards). In the worst case, if all selected validators were offline, no validator would ever call `cancel_round` or `init_ee_round`, permanently stalling the protocol even after slot-hash expiry. | Moved eligibility check from a function-level gate to a per-section guard. Non-selected validators now execute the full lifecycle (cancel, init-next-round, sweep rewards); only the commit block is gated by `eligible`. |
+| A7-M5 | **Medium** | Daemon used `bindingSlot` (offset 66, `init_slot + 675`) as the reveal window boundary. The actual `reveal_deadline` is at offset 58 (`init_slot + ~600`), approximately 75 slots (~28 seconds) earlier. Reveals submitted in the gap between `reveal_deadline` and `bindingSlot` failed on-chain with `WrongPhase`, clearing secrets and recording a miss — even though the validator had committed correctly. | Read `revealDeadline` from offset 58. Reveal section now uses `cur >= commitDeadline && cur < revealDeadline` as the window check. `eeAcct` is also re-read fresh immediately before the reveal section to avoid stale status from the (possibly long) commit section. |
+| A7-M6 | **Medium** | `ixReveal` did not include the `validator_reg` account. The V4.7 `RevealViaEe` struct adds `validator_reg` to enforce `contributor == x1_randomness_authority`. Existing daemon would fail with account count mismatch. | Added `{ pubkey: reg, isSigner: false, isWritable: false }` at position 5 in `ixReveal`'s key list. |
+| A7-L3 | **Low** | `ixInitEeRound` did not include the `fee_escrow` account. The V4.7 `InitEeRound` struct adds `fee_escrow` as a required writable account for the EE round ID stamp. | Added `fee_escrow` (writable) at position 7 in `ixInitEeRound`. Function now takes `protocolRound` as a parameter to derive the escrow PDA. Both call sites updated. |
+
+---
+
+### Cancel Script — V4.7 findings (all fixed)
+
+| ID | Severity | Issue | Fix |
+|----|----------|-------|-----|
+| A7-L4 | **Low** | `cancel-ee-round.js` checked `coordinator.equals(identity.publicKey)` and exited with an error if the round was opened by a hot key. In hot-key-only mode (the recommended setup), the EE round PDA is seeded by the hot key. Operators with a stuck CommitPhase round opened by a hot key had no manual escape hatch — they had to wait for the slot-hash expiry path in the daemon (~512 slots / ~3.2 minutes after binding slot). | Added `X1_RANDOMNESS_KEYPAIR` env var support. Script now accepts either `VALIDATOR_KEYPAIR` (cold identity) or `X1_RANDOMNESS_KEYPAIR` (hot key) as the coordinator keypair. Usage header updated with both invocation forms. |
+
+---
+
+### Security Model — V4.7 additions
+
+| Vector | Mitigated? | Notes |
+|--------|-----------|-------|
+| Spam deactivation via `mark_validator_missed` | ✅ Mitigated (V4.7) | `ValidatorMissRecord` PDA enforces one miss per (validator, EE round). Cost to create: ~0.00064 XNT rent, paid by caller. Cannot be called twice for the same round. |
+| False deactivation via identity-keyed reveal | ✅ Mitigated (V4.7) | `RevealViaEe` enforces `contributor == x1_randomness_authority`. Reveal PDA address is now deterministic regardless of which key was used pre-upgrade. |
+| Queued request fees permanently locked | ✅ Mitigated (V4.7) | `fulfill_queued_request` allows delivery to orphaned `RequestState` accounts once pool is warm. |
+| Pre-computation of `game_seed` from stale pool | ✅ Mitigated (V4.7) | Staleness guard prevents use of entropy older than 21,600 slots. |
+| WrapperRound PDA collision (protocol round = EE round ID) | ⚠️ Latent | Protocol round is ~2,383; EE round IDs are ~397,000. Collision at ~394,617 more protocol rounds. Not imminent. Both PDA types share the same seed prefix and discriminator. Fix requires differentiating seed prefixes in a future upgrade. |
+| `getProgramAccounts` EE scan hardcodes `dataSize: 838` | ⚠️ Latent | Any EE V4 upgrade changing round account size silently breaks all validator lookups. Monitor EE V4 program upgrades; update constant before upgrading. |
+
+---
+
+## Validator Upgrade Guide — V4.7
+
+**Required action for all validators.** The V4.7 program adds a required account (`validator_reg`) to `reveal_via_ee` and a required account (`fee_escrow`) to `init_ee_round`. Daemons running the pre-V4.7 code will send the wrong account list and every commit/reveal/init transaction will fail.
+
+**Deadline:** Upgrade before the next EE round starts. If your daemon is already running, it will begin failing at the next commit attempt.
+
+---
+
+### Who needs to do what
+
+| Role | Action required |
+|------|----------------|
+| All validators running `validator-daemon.js` | Pull latest code and restart daemon — **mandatory** |
+| Operator running `run-round.js` crank | Pull latest code and restart crank — **mandatory** (hasFees bug fix) |
+| Any operator using `cancel-ee-round.js` | Pull latest code — now supports hot key as coordinator |
+
+---
+
+### Upgrade procedure
+
+#### Option A — systemd (recommended for production)
+
+```bash
+# 1. Pull the latest code
+cd ~/x1-randomness-protocol
+git pull
+
+# 2. Install/update dependencies (if keeper/package.json changed)
+cd keeper && npm install && cd ..
+
+# 3. Restart the validator daemon
+sudo systemctl restart x1randomness-validator
+
+# 4. Confirm it is running and not erroring
+sudo systemctl status x1randomness-validator
+sudo journalctl -u x1randomness-validator -n 50 --no-pager
+```
+
+#### Option B — nohup (manual)
+
+```bash
+# 1. Pull latest code
+cd ~/x1-randomness-protocol
+git pull
+cd keeper && npm install && cd ..
+
+# 2. Kill the running daemon
+pkill -f validator-daemon.js || true
+
+# 3. Restart in hot-key-only mode (recommended — identity key stays on validator server)
+VALIDATOR_IDENTITY_PUBKEY=<your_identity_pubkey_base58> \
+X1_RANDOMNESS_KEYPAIR=~/.config/solana/x1randomness-hotkey.json \
+nohup node keeper/validator-daemon.js --loop > /tmp/validator-daemon.log 2>&1 &
+
+# OR restart in full mode (identity key on this machine)
+VALIDATOR_KEYPAIR=~/.config/solana/identity.json \
+nohup node keeper/validator-daemon.js --loop > /tmp/validator-daemon.log 2>&1 &
+
+# 4. Watch the first few polls
+tail -f /tmp/validator-daemon.log
+```
+
+#### Crank upgrade (owlx1 server)
+
+```bash
+cd ~/x1-randomness-protocol
+git pull
+pkill -f run-round.js || true
+CRANK_KEYPAIR=~/.config/solana/x1randomness-key.json \
+nohup node keeper/run-round.js --loop > /tmp/crank.log 2>&1 &
+tail -f /tmp/crank.log
+```
+
+---
+
+### Recommended systemd unit files
+
+#### Validator daemon — hot-key-only mode (separate randomness server)
+
+Save to `/etc/systemd/system/x1randomness-validator.service`:
+
+```ini
+[Unit]
+Description=X1 Randomness Protocol — Validator Daemon
+Documentation=https://github.com/Commoneffort/x1-randomness-protocol
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/home/YOUR_USER/x1-randomness-protocol/keeper
+
+# Hot-key-only mode: identity key stays on the validator server.
+# Replace YOUR_IDENTITY_PUBKEY with the base58 output of:
+#   solana-keygen pubkey ~/.config/solana/identity.json
+Environment=VALIDATOR_IDENTITY_PUBKEY=YOUR_IDENTITY_PUBKEY_BASE58
+Environment=X1_RANDOMNESS_KEYPAIR=/home/YOUR_USER/.config/solana/x1randomness-hotkey.json
+
+# Optional: stagger multiple daemons to reduce init_ee_round races
+# Environment=POLL_MS=13000   # use 13000 on one server, 17000 on another
+
+# Node binary path — adjust for your nvm installation
+ExecStart=/home/YOUR_USER/.nvm/versions/node/v22.22.2/bin/node \
+  /home/YOUR_USER/x1-randomness-protocol/keeper/validator-daemon.js --loop
+
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=x1randomness-validator
+
+# Prevent runaway restarts
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+#### Validator daemon — full mode (identity key on same machine)
+
+```ini
+[Unit]
+Description=X1 Randomness Protocol — Validator Daemon (full mode)
+Documentation=https://github.com/Commoneffort/x1-randomness-protocol
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/home/YOUR_USER/x1-randomness-protocol/keeper
+
+Environment=VALIDATOR_KEYPAIR=/home/YOUR_USER/.config/solana/identity.json
+# Optional hot key (V4.6+): if set, identity only signs init_ee_round and refresh
+# Environment=X1_RANDOMNESS_KEYPAIR=/home/YOUR_USER/.config/solana/x1randomness-hotkey.json
+
+ExecStart=/home/YOUR_USER/.nvm/versions/node/v22.22.2/bin/node \
+  /home/YOUR_USER/x1-randomness-protocol/keeper/validator-daemon.js --loop
+
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=x1randomness-validator
+
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+#### Crank
+
+```ini
+[Unit]
+Description=X1 Randomness Protocol — Crank
+Documentation=https://github.com/Commoneffort/x1-randomness-protocol
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/home/YOUR_USER/x1-randomness-protocol/keeper
+
+Environment=CRANK_KEYPAIR=/home/YOUR_USER/.config/solana/x1randomness-key.json
+
+ExecStart=/home/YOUR_USER/.nvm/versions/node/v22.22.2/bin/node \
+  /home/YOUR_USER/x1-randomness-protocol/keeper/run-round.js --loop
+
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=x1randomness-crank
+
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+#### Apply systemd changes
+
+```bash
+# After creating or editing a unit file:
+sudo systemctl daemon-reload
+sudo systemctl enable x1randomness-validator   # auto-start on boot
+sudo systemctl start x1randomness-validator
+
+# Check status
+sudo systemctl status x1randomness-validator
+
+# View live logs
+sudo journalctl -u x1randomness-validator -f
+
+# Restart after a git pull upgrade
+sudo systemctl restart x1randomness-validator && \
+  sudo journalctl -u x1randomness-validator -n 30 --no-pager
+```
+
+---
+
+### Verify the upgrade is working
+
+After restarting, look for these lines in the log within the first two poll cycles:
+
+```
+── Round XXXX / EE XXXXXX ──────────────────────────
+  Selected for EE round XXXXXX        ← eligibility passes
+  commit_via_ee: <sig>…               ← account list accepted by new program
+```
+
+If you see instead:
+```
+  Error: Transaction simulation failed: Error processing Instruction 0
+```
+Your daemon is still sending the old account list. Confirm `git pull` ran and restart.
+
+If you see:
+```
+  Not selected for EE round XXXXXX — will still manage round lifecycle
+```
+That is correct — non-selected validators now execute the full lifecycle, which is the V4.7 fix for the `isEligible()` gate bug.
+
+---
+
+### Recovering locked rewards from before V4.7
+
+The `hasFees()` bug caused `distribute_fees` to be skipped for all rounds since commit `1753b1d`. Rewards are sitting in FeeEscrow accounts with `fee_distributed = false`. Once the crank is upgraded, it will call `distribute_fees` on the current round normally. For past rounds with locked fees, the crank does not retroactively process them — those escrows will be swept by the protocol authority via `claim_validator_fees` (dust sweep) in a future maintenance pass.
+
+Validators do not need to take any action for past rounds. Future rounds after V4.7 will distribute normally.
