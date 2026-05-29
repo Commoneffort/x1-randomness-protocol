@@ -31,6 +31,7 @@ export default function ValidatorsPage() {
   const [regSuccess, setRegSuccess] = useState<string | null>(null);
   const [currentSlot, setCurrentSlot] = useState(0);
   const [lastAggregatedSlot, setLastAggregatedSlot] = useState(0);
+  const [roundStats, setRoundStats] = useState<{ total: number; failed: number; successful: number } | null>(null);
 
   const fetchReveals = useCallback(async () => {
     if (!publicKey) return;
@@ -65,6 +66,8 @@ export default function ValidatorsPage() {
       } else {
         setMyReg(undefined);
       }
+      // Fetch round health stats asynchronously — don't block registry display
+      client.getAllWrapperRoundStats(slot).then(setRoundStats).catch(() => {});
     } finally {
       setRegistryLoading(false);
     }
@@ -277,6 +280,39 @@ export default function ValidatorsPage() {
             </table>
           </div>
         )}
+      </div>
+
+      {/* Round health — cancelled / orphaned round tracking */}
+      <div className="card">
+        <h2 className="text-lg font-semibold text-text-primary mb-3">Round Health</h2>
+        {roundStats === null ? (
+          <div className="flex items-center gap-2 text-text-muted text-sm">
+            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-primary" />
+            Loading round stats…
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            {[
+              { k: "Total rounds", v: roundStats.total.toLocaleString() },
+              { k: "Successful (aggregated)", v: roundStats.successful.toLocaleString() },
+              { k: "Failed (cancelled / abandoned)", v: roundStats.failed.toLocaleString() },
+              {
+                k: "Success rate",
+                v: roundStats.total > 0
+                  ? `${((roundStats.successful / roundStats.total) * 100).toFixed(1)}%`
+                  : "—",
+              },
+            ].map(({ k, v }) => (
+              <div key={k} className={`p-3 rounded-lg border ${k === "Failed (cancelled / abandoned)" && roundStats.failed > 0 ? "bg-orange-50 border-orange-200" : "bg-surface-elevated border-border"}`}>
+                <p className="text-xs text-text-muted">{k}</p>
+                <p className={`text-sm font-semibold mt-0.5 ${k === "Failed (cancelled / abandoned)" && roundStats.failed > 0 ? "text-orange-700" : "text-text-primary"}`}>{v}</p>
+              </div>
+            ))}
+          </div>
+        )}
+        <p className="text-xs text-text-muted mt-3">
+          A round is counted as failed when its WrapperRound PDA is non-aggregated and older than the maximum round duration (~7.5 min). Causes: validator ran out of funds, coordinator did not cancel a stuck CommitPhase round, or fewer than m=5 validators revealed. Track this over time to decide whether a program upgrade is warranted.
+        </p>
       </div>
 
       {/* Registration form */}

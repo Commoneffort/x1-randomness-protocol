@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { ProtocolClient, WrapperRound, FeeEscrow } from "@/lib/protocol";
+import { ProtocolClient, WrapperRound, FeeEscrow, EntropyPool, ProtocolConfig } from "@/lib/protocol";
 import { SLOT_DURATION_MS } from "@/lib/constants";
 
 function StatusBadge({ aggregated }: { aggregated: boolean }) {
@@ -46,6 +46,12 @@ function EscrowBadge({ escrow }: { escrow: FeeEscrow | null }) {
   );
 }
 
+interface AllTimeStats {
+  allEscrows: FeeEscrow[];
+  pool: EntropyPool | null;
+  config: ProtocolConfig | null;
+}
+
 export default function RoundsPage() {
   const [client] = useState(() => new ProtocolClient());
   const [rounds, setRounds] = useState<WrapperRound[]>([]);
@@ -53,14 +59,19 @@ export default function RoundsPage() {
   const [currentSlot, setCurrentSlot] = useState(0);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<number | null>(null);
+  const [allTime, setAllTime] = useState<AllTimeStats>({ allEscrows: [], pool: null, config: null });
 
   const fetchData = async () => {
-    const [slot, wrs] = await Promise.all([
+    const [slot, wrs, allEscrows, pool, config] = await Promise.all([
       client.connection.getSlot("confirmed"),
       client.getAllWrapperRounds(15),
+      client.getAllFeeEscrows(),
+      client.getEntropyPool(),
+      client.getProtocolConfig(),
     ]);
     setCurrentSlot(slot);
     setRounds(wrs);
+    setAllTime({ allEscrows, pool, config });
 
     // Single getMultipleAccountsInfo call instead of N parallel getAccountInfo calls
     const escrowMap = await client.getMultipleFeeEscrows(wrs.map(wr => wr.round));
@@ -91,25 +102,40 @@ export default function RoundsPage() {
         </p>
       </div>
 
-      {/* Fee summary */}
+      {/* All-time fee summary */}
       {(() => {
-        const escrowList = Object.values(escrows).filter(Boolean) as FeeEscrow[];
-        const totalCollected = escrowList.reduce((s, e) => s + (e.originalFees || e.pendingFees), 0);
-        const totalDistributed = escrowList.filter(e => e.feeDistributed).reduce((s, e) => s + (e.originalFees || e.pendingFees), 0);
-        const roundsWithFees = escrowList.filter(e => (e.originalFees || e.pendingFees) > 0).length;
+        const { allEscrows, pool, config } = allTime;
+        const totalCollected = allEscrows.reduce((s, e) => s + (e.originalFees || e.pendingFees), 0);
+        const totalDistributed = allEscrows.filter(e => e.feeDistributed).reduce((s, e) => s + (e.originalFees || e.pendingFees), 0);
+        const roundsWithFees = allEscrows.filter(e => (e.originalFees || e.pendingFees) > 0).length;
+        const totalRequests = (pool?.totalRequestsServed ?? 0) + (pool?.totalGameSeeds ?? 0);
         return (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             {[
-              { label: "Collected (last 15 rounds)", value: `${client.formatXnt(totalCollected)} XNT` },
-              { label: "Distributed", value: `${client.formatXnt(totalDistributed)} XNT` },
+              { label: "All-time collected", value: `${client.formatXnt(totalCollected)} XNT` },
+              { label: "All-time distributed", value: `${client.formatXnt(totalDistributed)} XNT` },
               { label: "Validator earnings (95%)", value: `${client.formatXnt(Math.floor(totalDistributed * 0.95))} XNT` },
-              { label: "Rounds with fees", value: `${roundsWithFees} / ${escrowList.length}` },
+              { label: "Rounds / Requests served", value: `${config?.totalRounds ?? "—"} rounds · ${totalRequests.toLocaleString()} req` },
             ].map(({ label, value }) => (
               <div key={label} className="card py-3 px-4">
                 <p className="text-xs text-text-muted">{label}</p>
                 <p className="text-base font-semibold text-text-primary mt-0.5">{value}</p>
               </div>
             ))}
+          </div>
+        );
+      })()}
+
+      {/* Recent round fee summary */}
+      {(() => {
+        const escrowList = Object.values(escrows).filter(Boolean) as FeeEscrow[];
+        const recentCollected = escrowList.reduce((s, e) => s + (e.originalFees || e.pendingFees), 0);
+        const recentWithFees = escrowList.filter(e => (e.originalFees || e.pendingFees) > 0).length;
+        return (
+          <div className="flex items-center gap-4 px-1 text-xs text-text-muted">
+            <span>Last 15 rounds: <span className="text-text-primary font-medium">{client.formatXnt(recentCollected)} XNT collected</span></span>
+            <span>·</span>
+            <span><span className="text-text-primary font-medium">{recentWithFees} / {escrowList.length}</span> rounds had fees</span>
           </div>
         );
       })()}

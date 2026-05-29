@@ -11,6 +11,7 @@ import {
   DocumentTextIcon,
   QuestionMarkCircleIcon,
   CurrencyDollarIcon,
+  ExclamationTriangleIcon,
 } from "@heroicons/react/24/outline";
 import { PROGRAM_ID, REQUEST_FEE_LAMPORTS, GAME_SEED_FEE_LAMPORTS, EE_V4_STAKE_LAMPORTS, FEE_VALIDATORS_PCT, FEE_CRANK_PCT, STALENESS_HARD_LIMIT_SLOTS } from "@/lib/constants";
 
@@ -53,6 +54,7 @@ export default function DocsPage() {
           { href: "/dapps", icon: CubeIcon, title: "dApp Registration", sub: "Register for callbacks & fee overrides" },
           { href: "/rounds", icon: ClockIcon, title: "Round History", sub: "EE V4 commit/reveal lifecycle" },
           { href: "/validators", icon: ServerIcon, title: "Validators & Rewards", sub: "Earn fees by contributing entropy" },
+          { href: "#disclaimer", icon: ExclamationTriangleIcon, title: "Risk Disclosure", sub: "Stake risk, permissionless use, no warranty" },
         ].map(({ href, icon: Icon, title, sub }) => (
           <Link key={href} href={href} className="card flex items-center gap-3 hover:border-primary/30 transition-colors">
             <div className="p-2 rounded-lg bg-primary/10 shrink-0"><Icon className="h-5 w-5 text-primary" /></div>
@@ -638,6 +640,49 @@ const ix = new TransactionInstruction({
                   {q}
                 </p>
                 <p className="mt-1 ml-6">{a}</p>
+              </div>
+            ))}
+          </div>
+        </Section>
+
+        {/* Risk Disclosure */}
+        <Section id="disclaimer" title="Risk Disclosure & Terms of Participation">
+          <div className="p-4 bg-orange-50 border border-orange-200 rounded-lg flex gap-3">
+            <ExclamationTriangleIcon className="h-5 w-5 text-orange-600 shrink-0 mt-0.5" />
+            <p className="text-orange-800">
+              This protocol is experimental software deployed on X1 Mainnet. By participating — as a validator, dApp integrator, or randomness consumer — you accept the risks described below in full. There is no warranty, no recourse, and no controlling entity that can reverse on-chain outcomes.
+            </p>
+          </div>
+
+          <div className="space-y-3 mt-2">
+            {[
+              {
+                title: "Validator commit stake — slash risk",
+                body: `Each validator who is selected to participate in a round must call commit_via_ee and stake ${EE_V4_STAKE_LAMPORTS / 1e9} XNT. This stake is returned in full on a valid, on-time reveal. If the validator fails to call reveal_via_ee before reveal_deadline (~600 slots / ~3.75 min from round init), the ${EE_V4_STAKE_LAMPORTS / 1e9} XNT is forfeited to the EE V4 slash pool. This forfeiture is enforced automatically and irreversibly by the on-chain program — no human intervention is needed or possible. Validators bear sole responsibility for maintaining the infrastructure required to reveal on time.`,
+              },
+              {
+                title: "Permissionless protocol — no restrictions on use",
+                body: "The protocol is fully permissionless. Anyone can call request_randomness, game_seed, register as a dApp, or run a validator node. There are no terms of service, no whitelist, and no entity capable of restricting access. The randomness output can be used for any purpose. Participants accept that others may use the same infrastructure for applications they find objectionable — neither the protocol nor its operators have the ability to intervene.",
+              },
+              {
+                title: "dApp integrators — assume all risk",
+                body: "dApps that integrate this protocol for randomness-dependent applications (games, lotteries, NFT mints, financial products, etc.) do so entirely at their own risk. The protocol does not guarantee availability, latency, or any particular statistical property beyond what is mathematically enforced on-chain. dApp operators are solely responsible for ensuring their integration is correct, that they handle the queued path (pool stale or round cancelled) gracefully, and that their users understand the risks.",
+              },
+              {
+                title: "No warranty, no recourse",
+                body: "This protocol is provided as-is. There is no entity that controls it, no upgrade authority with special powers over user funds, and no mechanism to reverse, pause, or compensate for any on-chain outcome. Fees paid for requests that end up in a cancelled round can be recovered via refund_request, but this too is a permissionless on-chain call — no party is obligated to execute it on your behalf.",
+              },
+              {
+                title: "Experimental software",
+                body: "X1 Randomness Protocol V4 is experimental. It has been reviewed for known attack vectors and security properties are documented in the Security section above. Nevertheless, undiscovered vulnerabilities may exist. Do not use this protocol for applications where a loss of funds or biased randomness would be catastrophic or irreversible without independent security review.",
+              },
+            ].map(({ title, body }) => (
+              <div key={title} className="flex gap-3 p-3 bg-surface-elevated rounded-lg border border-border">
+                <ExclamationTriangleIcon className="h-5 w-5 text-orange-500 shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-medium text-text-primary">{title}</p>
+                  <p className="mt-0.5">{body}</p>
+                </div>
               </div>
             ))}
           </div>
