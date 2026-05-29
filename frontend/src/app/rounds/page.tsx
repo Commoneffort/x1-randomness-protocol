@@ -105,17 +105,17 @@ export default function RoundsPage() {
       {/* All-time fee summary */}
       {(() => {
         const { allEscrows, pool, config } = allTime;
-        const totalCollected = allEscrows.reduce((s, e) => s + (e.originalFees || e.pendingFees), 0);
-        const totalDistributed = allEscrows.filter(e => e.feeDistributed).reduce((s, e) => s + (e.originalFees || e.pendingFees), 0);
-        const roundsWithFees = allEscrows.filter(e => (e.originalFees || e.pendingFees) > 0).length;
+        const distributed = allEscrows.filter(e => e.feeDistributed);
+        const totalDistributed = distributed.reduce((s, e) => s + (e.originalFees || e.pendingFees), 0);
         const totalRequests = (pool?.totalRequestsServed ?? 0) + (pool?.totalGameSeeds ?? 0);
+        const roundsCompleted = distributed.length;
         return (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             {[
-              { label: "All-time collected", value: `${client.formatXnt(totalCollected)} XNT` },
-              { label: "All-time distributed", value: `${client.formatXnt(totalDistributed)} XNT` },
+              { label: "Total rounds", value: config?.totalRounds != null ? config.totalRounds.toLocaleString() : "—" },
+              { label: "Requests served", value: totalRequests.toLocaleString() },
+              { label: "Fees distributed to validators", value: `${client.formatXnt(totalDistributed)} XNT` },
               { label: "Validator earnings (95%)", value: `${client.formatXnt(Math.floor(totalDistributed * 0.95))} XNT` },
-              { label: "Rounds / Requests served", value: `${config?.totalRounds ?? "—"} rounds · ${totalRequests.toLocaleString()} req` },
             ].map(({ label, value }) => (
               <div key={label} className="card py-3 px-4">
                 <p className="text-xs text-text-muted">{label}</p>

@@ -51,10 +51,11 @@ export default function ValidatorsPage() {
   const fetchRegistry = useCallback(async () => {
     setRegistryLoading(true);
     try {
-      const [all, slot, pool] = await Promise.all([
+      const [all, slot, pool, config] = await Promise.all([
         client.getAllValidatorRegistrations(),
         client.connection.getSlot("confirmed"),
         client.getEntropyPool(),
+        client.getProtocolConfig(),
       ]);
       all.sort((a, b) => Number(b.verifiedStake) - Number(a.verifiedStake));
       setAllValidators(all);
@@ -66,9 +67,11 @@ export default function ValidatorsPage() {
       } else {
         setMyReg(undefined);
       }
-      // Fetch round health stats asynchronously — don't block registry display.
-      // sinceRound baseline excludes all historical rounds that pre-date this metric.
-      client.getAllWrapperRoundStats(slot, ROUND_STATS_BASELINE_ROUND).then(setRoundStats).catch(() => {});
+      // Fetch round health stats async — don't block registry display.
+      // maxRound = protocolConfig.currentRound excludes EE WrapperRounds (same discriminator, huge IDs).
+      // sinceRound baseline excludes historical rounds pre-dating this metric.
+      const maxRound = config?.currentRound ?? Number.MAX_SAFE_INTEGER;
+      client.getAllWrapperRoundStats(slot, ROUND_STATS_BASELINE_ROUND, maxRound).then(setRoundStats).catch(() => {});
     } finally {
       setRegistryLoading(false);
     }

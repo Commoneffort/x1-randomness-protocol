@@ -422,10 +422,11 @@ export class ProtocolClient {
   }
 
   // Returns total, successful, and failed (non-aggregated and old) WrapperRound counts.
-  // sinceRound: only count rounds >= this number (use ROUND_STATS_BASELINE_ROUND to exclude
-  // historical rounds that pre-date the metric being tracked).
+  // sinceRound: only count rounds >= this number (ROUND_STATS_BASELINE_ROUND excludes history).
+  // maxRound: upper bound — pass ProtocolConfig.currentRound to exclude EE WrapperRounds, which
+  //   share the same discriminator but have round numbers in the hundreds of thousands.
   // Uses dataSlice to minimise data transfer — only fetches round + startSlot + aggregated (25 bytes).
-  async getAllWrapperRoundStats(currentSlot: number, sinceRound = 0): Promise<{ total: number; failed: number; successful: number }> {
+  async getAllWrapperRoundStats(currentSlot: number, sinceRound = 0, maxRound = Number.MAX_SAFE_INTEGER): Promise<{ total: number; failed: number; successful: number }> {
     try {
       const disc = ACCT_DISC.WrapperRound;
       const accounts = await this.connection.getProgramAccounts(
@@ -443,7 +444,7 @@ export class ProtocolClient {
         const round      = Number(d.readBigUInt64LE(0));  // original offset 8
         const startSlot  = Number(d.readBigUInt64LE(16)); // original offset 24
         const aggregated = d[24] !== 0;                   // original offset 32
-        if (round < sinceRound) continue;
+        if (round < sinceRound || round > maxRound) continue; // exclude pre-baseline and EE WrapperRounds
         total++;
         // A round is definitively failed when non-aggregated and too old to still be in progress.
         // Max round duration: commit (200) + reveal (600) + binding (675) + expiry grace (512) ≈ 2000 slots.
