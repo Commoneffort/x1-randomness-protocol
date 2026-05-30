@@ -353,9 +353,22 @@ export default function ValidatorsPage() {
                 <p>Vote:  {myReg.voteAccount.slice(0, 20)}…</p>
                 <p>Stake: {myReg.stakeAccount.slice(0, 20)}…</p>
                 <p>Verified stake: {(myReg.verifiedStake / 1e9).toLocaleString()} XNT</p>
+                <p>Hot key: {myReg.x1RandomnessAuthority ?? "—"}{myReg.x1RandomnessAuthority === myReg.identity ? " (not rotated)" : " ✓"}</p>
                 <p>Status: {myReg.active ? "✓ active" : "✗ inactive — run: VALIDATOR_KEYPAIR=~/.config/solana/identity.json node keeper/validator-daemon.js --refresh (on your validator server)"}</p>
               </div>
             </div>
+            {myReg.x1RandomnessAuthority === myReg.identity && (
+              <div className="p-3 bg-orange-50 border border-orange-300 rounded-lg text-sm text-orange-800">
+                <p className="font-semibold mb-1">⚠ You must rotate to a hot key before starting the daemon</p>
+                <p className="text-xs mb-2">Your daemon will sign commits and reveals with <code className="font-mono">x1_randomness_authority</code>. Right now it equals your identity key — the daemon would need your cold key online to run. Run this on your validator server to generate a hot key and rotate:</p>
+                <pre className="text-xs font-mono bg-orange-100 rounded p-2 whitespace-pre-wrap">{`# On your VALIDATOR server
+solana-keygen new --no-bip39-passphrase -o ~/.config/solana/x1randomness-hotkey.json
+VALIDATOR_KEYPAIR=~/.config/solana/identity.json \\
+  node keeper/validator-daemon.js --rotate-authority \\
+  $(solana-keygen pubkey ~/.config/solana/x1randomness-hotkey.json)`}</pre>
+                <p className="text-xs mt-2">Then copy <code className="font-mono">x1randomness-hotkey.json</code> to your randomness server and use <code className="font-mono">X1_RANDOMNESS_KEYPAIR</code> in the daemon — your identity key never needs to be online again.</p>
+              </div>
+            )}
             {regSuccess && <div className="p-3 bg-green-50 rounded-lg text-green-700 text-sm">{regSuccess}</div>}
             {regError && <div className="p-3 bg-red-50 rounded-lg text-red-700 text-sm">{regError}</div>}
             <button
@@ -388,7 +401,20 @@ export default function ValidatorsPage() {
                 className="w-full px-3 py-2 text-sm font-mono bg-surface-elevated border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary/30 text-text-primary placeholder:text-text-muted"
               />
             </div>
-            {regSuccess && <div className="p-3 bg-green-50 rounded-lg text-green-700 text-sm">{regSuccess}</div>}
+            {regSuccess && (
+              <div className="space-y-2">
+                <div className="p-3 bg-green-50 rounded-lg text-green-700 text-sm">{regSuccess}</div>
+                <div className="p-3 bg-orange-50 border border-orange-300 rounded-lg text-sm text-orange-800">
+                  <p className="font-semibold mb-1">Next step: rotate to a hot key before starting the daemon</p>
+                  <p className="text-xs mb-2">Registration stores your connected wallet as both the identity and the signing key (<code className="font-mono">x1_randomness_authority</code>). Run this on your validator server to separate them:</p>
+                  <pre className="text-xs font-mono bg-orange-100 rounded p-2 whitespace-pre-wrap">{`solana-keygen new --no-bip39-passphrase -o ~/.config/solana/x1randomness-hotkey.json
+VALIDATOR_KEYPAIR=~/.config/solana/identity.json \\
+  node keeper/validator-daemon.js --rotate-authority \\
+  $(solana-keygen pubkey ~/.config/solana/x1randomness-hotkey.json)`}</pre>
+                  <p className="text-xs mt-2">See the <strong>Validator Daemon Setup</strong> section below for the full setup guide.</p>
+                </div>
+              </div>
+            )}
             {regError && <div className="p-3 bg-red-50 rounded-lg text-red-700 text-sm">{regError}</div>}
             <button
               onClick={registerValidator}
