@@ -25,7 +25,7 @@
 
 'use strict';
 const { createHash, createPrivateKey, sign: edSign } = require('node:crypto');
-const { webcrypto } = require('node:crypto');
+const { ed25519: _ed } = require('@noble/curves/ed25519');
 const fs   = require('node:fs');
 const https = require('node:https');
 const http  = require('node:http');
@@ -111,14 +111,11 @@ function loadKeypair(path) {
 }
 
 // ── PDA derivation ────────────────────────────────────────────────────────────
-async function isOnCurve(bytes) {
-  try {
-    await webcrypto.subtle.importKey('raw', bytes, { name: 'Ed25519' }, false, ['verify']);
-    return true;
-  } catch { return false; }
+function isOnCurve(bytes) {
+  try { _ed.ExtendedPoint.fromHex(bytes); return true; } catch { return false; }
 }
 
-async function findPda(seeds, programIdB58) {
+function findPda(seeds, programIdB58) {
   const progBytes = b58decode(programIdB58);
   for (let nonce = 255; nonce >= 0; nonce--) {
     const h = createHash('sha256');
@@ -127,7 +124,7 @@ async function findPda(seeds, programIdB58) {
     h.update(Buffer.from([nonce]));
     h.update(Buffer.from('ProgramDerivedAddress'));
     const candidate = h.digest();
-    if (!(await isOnCurve(candidate))) return [candidate, nonce];
+    if (!isOnCurve(candidate)) return [candidate, nonce];
   }
   throw new Error('Could not find a valid PDA nonce (this should never happen)');
 }
