@@ -120,8 +120,8 @@ function findPda(seeds, programIdB58) {
   for (let nonce = 255; nonce >= 0; nonce--) {
     const h = createHash('sha256');
     for (const s of seeds) h.update(s);
-    h.update(progBytes);
     h.update(Buffer.from([nonce]));
+    h.update(progBytes);
     h.update(Buffer.from('ProgramDerivedAddress'));
     const candidate = h.digest();
     if (!isOnCurve(candidate)) return [candidate, nonce];
