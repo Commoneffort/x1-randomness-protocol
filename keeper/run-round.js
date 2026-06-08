@@ -241,6 +241,53 @@ function ixAggregateFromEe(protocolRound, eeRound) {
   });
 }
 
+function ixFulfillQueued(requestPubkey) {
+  const [pool] = poolPda();
+  const [cfg]  = cfgPda();
+  return new TransactionInstruction({ programId: PROGRAM_ID,
+    keys: [
+      { pubkey: requestPubkey,             isSigner: false, isWritable: true  },
+      { pubkey: pool,                      isSigner: false, isWritable: true  },
+      { pubkey: cfg,                       isSigner: false, isWritable: false },
+      { pubkey: SYSVAR_SLOT_HASHES_PUBKEY, isSigner: false, isWritable: false },
+      { pubkey: payer.publicKey,           isSigner: true,  isWritable: false },
+    ],
+    data: disc("fulfill_queued_request"),
+  });
+}
+
+async function sweepQueuedRequests() {
+  const REQUEST_DISC = Buffer.from([106, 141, 109, 114, 88, 187, 109, 5]);
+  const stuck = await conn.getProgramAccounts(PROGRAM_ID, {
+    filters: [
+      { dataSize: 202 },
+      { memcmp: { offset: 0,   bytes: bs58.encode(REQUEST_DISC) } },
+      { memcmp: { offset: 152, bytes: bs58.encode(Buffer.from([0])) } },
+    ],
+    dataSlice: { offset: 0, length: 0 },
+  });
+  if (!stuck.length) return;
+  console.log(`  [1d] fulfill_queued_request — ${stuck.length} stuck request(s)`);
+  let ok = 0;
+  for (const { pubkey } of stuck) {
+    try {
+      await send(ixFulfillQueued(pubkey), [payer], `fulfill_queued(${pubkey.toBase58().slice(0, 8)}…)`);
+      ok++;
+    } catch (e) {
+      const eText = e.message + JSON.stringify(e.logs ?? []);
+      if (eText.includes("RoundAlreadyAggregated") || eText.includes("already")) {
+        // already fulfilled — skip
+      } else if (eText.includes("EntropyPoolNotAvailable") || eText.includes("0x1773")) {
+        console.warn(`  ↳ Pool not available — will retry next round`);
+        break;
+      } else {
+        console.warn(`  ↳ fulfill_queued failed for ${pubkey.toBase58().slice(0, 8)}…: ${(e.message ?? "").slice(0, 80)}`);
+      }
+    }
+  }
+  if (ok) console.log(`  ↳ Fulfilled ${ok}/${stuck.length}`);
+}
+
 async function hasFees(round) {
   const [escrow] = escrowPda(round);
   const info = await conn.getAccountInfo(escrow);
@@ -413,19 +460,27 @@ async function runRound() {
       } else { throw e; }
     }
 
-    console.log(`  [1c] distribute_fees (round ${currentRound})`);
-    if (!await hasFees(currentRound)) {
-      console.log(`  ↳ No fees (no requests this round)`);
-    } else {
-      try {
-        await send(ixDistributeFees(currentRound), [payer], "distribute_fees");
-      } catch (e) {
-        if (e.message?.includes("AlreadyDistributed")) {
-          console.log(`  ↳ Already distributed`);
-        } else { throw e; }
-      }
+  }
+
+  // ── Step 1c: distribute_fees — outside if/else so it runs even when already aggregated ──
+  console.log(`  [1c] distribute_fees (round ${currentRound})`);
+  if (!await hasFees(currentRound)) {
+    console.log(`  ↳ No fees (no requests this round)`);
+  } else {
+    try {
+      await send(ixDistributeFees(currentRound), [payer], "distribute_fees");
+    } catch (e) {
+      const eText = e.message + JSON.stringify(e.logs ?? []);
+      if (eText.includes("AlreadyDistributed") || eText.includes("0x1787")) {
+        console.log(`  ↳ Already distributed`);
+      } else if (eText.includes("RoundNotAggregatable") || eText.includes("0x1776")) {
+        console.log(`  ↳ Round not yet aggregatable (cancelled EE) — will retry next cycle`);
+      } else { throw e; }
     }
   }
+
+  // ── Step 1d: Flush queue-path requests now that pool entropy is fresh ────────
+  await sweepQueuedRequests();
 
   // ── Idle gate ────────────────────────────────────────────────────────────────
   // Skip advancing if the pool is warm and nobody has queued unfulfilled requests.
