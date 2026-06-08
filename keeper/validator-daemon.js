@@ -787,7 +787,7 @@ async function runOnce() {
   // Clear stale secrets only once the reveal deadline has passed and the round is no longer revealable.
   // !inRevealWindow is NOT sufficient — it's also true while waiting for all n validators to commit
   // (status=0, between commitDeadline and RevealPhase), which would delete secrets we still need.
-  if (cur >= revealDeadline && !revealed && eeRoundStatus !== 1) {
+  if (cur >= revealDeadline && !revealed && eeRoundStatus !== 1 && loadSecrets(eeV4RoundId) !== null) {
     console.log(`  EE round ${eeV4RoundId} status=${eeRoundStatus} — cannot reveal, clearing stale secrets`);
     clearSecrets();
   }
