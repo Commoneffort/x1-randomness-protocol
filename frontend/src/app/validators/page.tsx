@@ -200,12 +200,22 @@ export default function ValidatorsPage() {
   // This fires regardless of active flag — consecutive_misses stays 0 until mark_validator_missed
   // is implemented, so active===true alone is not a reliable liveness signal.
   const ROUND_CYCLE_SLOTS = 1400;
-  const validatorStatus = (v: ValidatorRegistration): "active" | "not-committing" | "inactive" => {
+  // A validator silent for ~1 day of slots is treated as offline — a long-dead node
+  // that never deregistered (deregister is self-only, so it cannot be removed for them).
+  // These are hidden from the registry table below and excluded from the Active count,
+  // distinct from a transient "not-committing" (missed a recent round but still around).
+  const OFFLINE_SLOTS = 230_000; // ~1 day at ~0.375s/slot
+  const validatorStatus = (v: ValidatorRegistration): "active" | "not-committing" | "offline" | "inactive" => {
     if (!v.active) return "inactive";
+    if (lastAggregatedSlot > 0 && lastAggregatedSlot - v.lastActiveSlot > OFFLINE_SLOTS)
+      return "offline";
     if (lastAggregatedSlot > 0 && lastAggregatedSlot - v.lastActiveSlot > ROUND_CYCLE_SLOTS * 2)
       return "not-committing";
     return "active";
   };
+  const visibleValidators = allValidators.filter(v => validatorStatus(v) !== "offline");
+  const offlineCount = allValidators.length - visibleValidators.length;
+  const liveCount = allValidators.filter(v => validatorStatus(v) === "active").length;
 
   return (
     <div className="space-y-6">
@@ -221,8 +231,8 @@ export default function ValidatorsPage() {
         <h2 className="text-lg font-semibold text-text-primary mb-3">Validator Registry</h2>
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
           {[
-            { k: "Registered", v: allValidators.length.toString() },
-            { k: "Active", v: allValidators.filter(v => v.active).length.toString() },
+            { k: "Registered", v: offlineCount > 0 ? `${allValidators.length} (${offlineCount} offline)` : allValidators.length.toString() },
+            { k: "Active", v: liveCount.toString() },
             { k: "Min stake", v: `${MIN_VALIDATOR_STAKE_XNT.toLocaleString()} XNT` },
             { k: "Committee size", v: `n=${EE_V4_N_CONTRIBUTORS} commit, m=${EE_V4_M_THRESHOLD} reveal to finalize` },
           ].map(({ k, v }) => (
@@ -253,7 +263,7 @@ export default function ValidatorsPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {allValidators.map(v => {
+                {visibleValidators.map(v => {
                   const status = validatorStatus(v);
                   return (
                     <tr key={v.identity} className="text-text-primary">
@@ -282,6 +292,12 @@ export default function ValidatorsPage() {
                 })}
               </tbody>
             </table>
+            {offlineCount > 0 && (
+              <p className="text-xs text-text-muted mt-3">
+                {offlineCount} offline {offlineCount === 1 ? "registration" : "registrations"} hidden
+                (no commit in &gt; 1 day — long-dead node that never deregistered).
+              </p>
+            )}
           </div>
         )}
       </div>
