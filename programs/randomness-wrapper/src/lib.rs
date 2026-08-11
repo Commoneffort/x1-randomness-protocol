@@ -68,10 +68,19 @@ pub const EE_V4_M_THRESHOLD: u8 = 5;
 //   LandedVote = latency u8(1) + slot u64(8) + confirmation_count u32(4) = 13 bytes
 // StakeState: tag u32[0..4] | Meta[4..124] | Delegation: voter_pubkey[124..156]
 //   | stake u64[156..164] | activation_epoch[164..172] | deactivation_epoch[172..180]
-pub const VOTE_VOTES_LEN_OFFSET: usize = 69;
-pub const VOTE_VOTES_START: usize = 77;
-pub const VOTE_ENTRY_SIZE: usize = 13; // LandedVote
+pub const VOTE_VOTES_LEN_OFFSET: usize = 69; // VoteState V3 (disc 2): votes len u64 offset
+pub const VOTE_ENTRY_SIZE: usize = 13; // LandedVote (latency u8 + slot u64 + conf u32)
 pub const VOTE_SLOT_OFFSET_IN_ENTRY: usize = 1; // after latency byte
+// VoteState V4 (SIMD-0185, discriminant 3). A larger header precedes the votes VecDeque:
+//   4(disc)+32(node)+32(withdrawer)+32(inflation_rewards_collector)+32(block_revenue_collector)
+//   +2(inflation_bps)+2(block_bps)+8(pending_delegator_rewards) = 144, then
+//   Option<bls_pubkey_compressed> (1-byte tag; +48 if Some), then votes len (u64).
+pub const VOTE_V4_BLS_OPTION_OFFSET: usize = 144;
+pub const VOTE_V4_VOTES_LEN_OFFSET_NONE: usize = 145; // bls = None
+pub const VOTE_V4_BLS_SOME_EXTRA: usize = 48; // added when bls = Some
+pub const VOTE_STATE_V3: u32 = 2;
+pub const VOTE_STATE_V4: u32 = 3;
+pub const MAX_LOCKOUT_HISTORY: usize = 64; // sanity cap on decoded vote count (tower holds <=31)
 pub const STAKE_TAG_OFFSET: usize = 0;
 pub const STAKE_VOTER_PUBKEY_OFFSET: usize = 124;
 pub const STAKE_LAMPORTS_OFFSET: usize = 156;
@@ -2738,15 +2747,43 @@ fn parse_stake_account(data: &[u8]) -> Result<(Pubkey, u64)> {
 /// Returns the slot of the most recent (last) vote entry.
 /// Offsets verified against live X1 mainnet accounts.
 fn parse_last_vote_slot(data: &[u8]) -> Result<u64> {
-    require!(data.len() > VOTE_VOTES_START, RandomnessError::InvalidVoteAccount);
+    require!(data.len() >= 4, RandomnessError::InvalidVoteAccount);
+    let version = u32::from_le_bytes(
+        data[0..4].try_into().map_err(|_| error!(RandomnessError::InvalidVoteAccount))?
+    );
+
+    // Locate the votes VecDeque length prefix. The header size differs by version:
+    //   V3 (disc 2): votes len u64 at offset 69
+    //   V4 (disc 3, SIMD-0185): votes len u64 at 145 (bls None) or 193 (bls Some)
+    let len_offset = match version {
+        VOTE_STATE_V3 => VOTE_VOTES_LEN_OFFSET,
+        VOTE_STATE_V4 => {
+            require!(data.len() > VOTE_V4_BLS_OPTION_OFFSET, RandomnessError::InvalidVoteAccount);
+            let bls_some = data[VOTE_V4_BLS_OPTION_OFFSET] == 1;
+            VOTE_V4_VOTES_LEN_OFFSET_NONE + if bls_some { VOTE_V4_BLS_SOME_EXTRA } else { 0 }
+        }
+        _ => return Err(error!(RandomnessError::InvalidVoteAccount)),
+    };
+    let votes_start = len_offset + 8;
+
+    require!(data.len() >= votes_start, RandomnessError::InvalidVoteAccount);
     let count = u64::from_le_bytes(
-        data[VOTE_VOTES_LEN_OFFSET..VOTE_VOTES_LEN_OFFSET + 8]
+        data[len_offset..len_offset + 8]
             .try_into().map_err(|_| error!(RandomnessError::InvalidVoteAccount))?
     ) as usize;
     require!(count > 0, RandomnessError::ValidatorNotActivelyVoting);
+    // Defensive: a valid vote tower holds at most MAX_LOCKOUT_HISTORY lockouts. Reject
+    // anything larger rather than trusting a possibly-misparsed length (prevents the
+    // (count-1)*ENTRY_SIZE overflow that bricked init on the V3→V4 vote-format change).
+    require!(count <= MAX_LOCKOUT_HISTORY, RandomnessError::InvalidVoteAccount);
 
-    let last_entry_base = VOTE_VOTES_START + (count - 1) * VOTE_ENTRY_SIZE;
-    let slot_offset = last_entry_base + VOTE_SLOT_OFFSET_IN_ENTRY;
+    // Checked arithmetic throughout — a malformed account returns an error, never panics.
+    let last_entry_base = count
+        .checked_sub(1).ok_or(error!(RandomnessError::InvalidVoteAccount))?
+        .checked_mul(VOTE_ENTRY_SIZE).ok_or(error!(RandomnessError::InvalidVoteAccount))?
+        .checked_add(votes_start).ok_or(error!(RandomnessError::InvalidVoteAccount))?;
+    let slot_offset = last_entry_base
+        .checked_add(VOTE_SLOT_OFFSET_IN_ENTRY).ok_or(error!(RandomnessError::InvalidVoteAccount))?;
     require!(data.len() >= slot_offset + 8, RandomnessError::InvalidVoteAccount);
 
     let slot = u64::from_le_bytes(
