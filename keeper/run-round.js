@@ -288,11 +288,27 @@ async function sweepQueuedRequests() {
   if (ok) console.log(`  ↳ Fulfilled ${ok}/${stuck.length}`);
 }
 
+// Whether this round still has fees that distribute_fees has not handled.
+//
+// Two conditions, and the second one is why this exists. `pending_fees`
+// (offset 8) does NOT go to zero when a round is distributed: the 5% crank cut
+// and the per-validator shares are integer divisions, and the rounding
+// remainder stays in the escrow until the protocol authority sweeps it with
+// claim_validator_fees. Round 3422 was left holding 72 622 lamports of that
+// dust.
+//
+// Checking pending_fees alone therefore reported "there are fees" for ever
+// after. The crank called distribute_fees on an already-distributed round
+// every pass, the program rejected it, and step 1c rethrew — so the crank
+// never reached step 2, never advanced the round, and the whole protocol sat
+// still while every validator daemon idled behind it. `fee_distributed`
+// (offset 40) is the flag that actually answers the question.
 async function hasFees(round) {
   const [escrow] = escrowPda(round);
   const info = await conn.getAccountInfo(escrow);
-  if (!info || info.data.length < 41) return false;
-  return info.data.readBigUInt64LE(8) > 0n; // pending_fees at offset 8 (original_fees at 24 is only set by distribute_fees itself)
+  if (!info || info.data.length < 42) return false;
+  if (info.data[40] !== 0) return false;          // fee_distributed
+  return info.data.readBigUInt64LE(8) > 0n;       // pending_fees
 }
 
 function ixDistributeFees(round) {
@@ -471,7 +487,13 @@ async function runRound() {
       await send(ixDistributeFees(currentRound), [payer], "distribute_fees");
     } catch (e) {
       const eText = e.message + JSON.stringify(e.logs ?? []);
-      if (eText.includes("AlreadyDistributed") || eText.includes("0x1787")) {
+      // 0x1777 / RoundAlreadyAggregated is what the deployed program throws
+      // when distribute_fees is called on a round that has already had it —
+      // not the 0x1787 this only used to catch. Either way it means the work
+      // is done, and neither is a reason to abandon the round: without this
+      // the crank threw, restarted, and threw again every thirty seconds.
+      if (eText.includes("AlreadyDistributed") || eText.includes("0x1787") ||
+          eText.includes("RoundAlreadyAggregated") || eText.includes("0x1777")) {
         console.log(`  ↳ Already distributed`);
       } else if (eText.includes("RoundNotAggregatable") || eText.includes("0x1776")) {
         console.log(`  ↳ Round not yet aggregatable (cancelled EE) — will retry next cycle`);
