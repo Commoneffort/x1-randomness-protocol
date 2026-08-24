@@ -2,6 +2,14 @@
 
 Guidance for Claude Code working in this repository.
 
+## Operator docs
+
+- `VALIDATORS.md` — validator-facing guide: registration, hot-key rotation,
+  running the daemon, what normal idle behaviour looks like, and the two kinds
+  of upgrade (program-only vs coordinated).
+- `docs/V4.8-SPEC.md` — the next coordinated upgrade (reset `consecutive_misses`
+  on reveal). Specified, not scheduled. Daemons update **before** the deploy.
+
 ## Build
 
 Use plain `anchor build` — the `--tools-version` flag is no longer supported by the installed `cargo-build-sbf` version and will fail:
