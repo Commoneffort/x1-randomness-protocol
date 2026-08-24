@@ -174,6 +174,97 @@ function ixRefreshValidatorStatus(identity, voteAccount, stakeAccount) {
   });
 }
 
+/**
+ * Reset any validator whose consecutive_misses has started climbing.
+ *
+ * This exists to make one specific failure impossible: **the whole validator
+ * set being deactivated by misses accumulated over time.**
+ *
+ * The on-chain state machine has a gap. `mark_validator_missed` increments
+ * `consecutive_misses` and deactivates a validator at
+ * VALIDATOR_MAX_CONSECUTIVE_MISSES (5), but `reveal_via_ee` does *not* reset
+ * the counter on a successful reveal, even though the field is documented to.
+ * The only resets are `register_validator` and `refresh_validator_status`.
+ *
+ * That matters because EE_V4_N_CONTRIBUTORS (7) is smaller than the active
+ * set, so the commit slots fill first-come and a different validator is shut
+ * out of every round. If anyone ever cranked `mark_validator_missed` across
+ * the registry, each round would add a permanent miss to whoever was excluded,
+ * the exclusion would rotate, and **every validator would reach 5 and go
+ * inactive in about forty rounds** — a few days. Nobody has built that crank,
+ * which is the only reason it has never happened.
+ *
+ * `refresh_validator_status` is permissionless — its Accounts struct has no
+ * Signer at all — so any crank may reset any validator's counter, and it only
+ * succeeds if that validator's vote is live and its stake is still ≥ the
+ * minimum. So this guard has exactly the right semantics in both directions:
+ *
+ *   healthy validator  → refresh succeeds, misses go back to 0, cannot be
+ *                        evicted by an accumulation it did not deserve
+ *   genuinely dead one → refresh fails on ValidatorNotActivelyVoting, misses
+ *                        stand, and it remains evictable as intended
+ *
+ * The guarantee is arithmetic, not best-effort. `mark_validator_missed` needs
+ * a distinct finalised EE round per miss (the miss-record PDA is seeded by
+ * round *and* identity), and rounds are hours apart, so a validator can gain
+ * at most one miss per round. This runs every crank cycle. Five can never be
+ * reached while a crank is up.
+ *
+ * Costs nothing in the normal case: `consecutive_misses` is 0 for everybody,
+ * so no transaction is sent. The registry scan is throttled because it is a
+ * getProgramAccounts and the public RPC rate-limits.
+ */
+const MISS_GUARD_INTERVAL_MS = 5 * 60 * 1000;
+let missGuardLastRun = 0;
+
+async function resetAccumulatedMisses() {
+  if (Date.now() - missGuardLastRun < MISS_GUARD_INTERVAL_MS) return;
+  missGuardLastRun = Date.now();
+
+  let regs;
+  try {
+    regs = await conn.getProgramAccounts(PROGRAM_ID, { filters: [{ dataSize: 171 }] });
+  } catch (e) {
+    console.warn(`  ⚠ miss guard: registry scan failed (${e.message}) — will retry`);
+    return;
+  }
+
+  // Offsets per ValidatorRegistration: identity 8, vote 40, stake 72,
+  // consecutive_misses 136, active 137.
+  const climbing = regs
+    .map(({ account }) => ({
+      identity: new PublicKey(account.data.subarray(8, 40)),
+      vote:     new PublicKey(account.data.subarray(40, 72)),
+      stake:    new PublicKey(account.data.subarray(72, 104)),
+      misses:   account.data[136],
+    }))
+    .filter(v => v.misses > 0);
+
+  if (climbing.length === 0) return;
+
+  console.log(`  [guard] ${climbing.length} validator(s) with misses > 0 — resetting`);
+  for (const v of climbing) {
+    const who = v.identity.toBase58().slice(0, 8);
+    try {
+      await send(
+        ixRefreshValidatorStatus(v.identity, v.vote, v.stake),
+        [payer],
+        `refresh_validator_status(${who}…, misses=${v.misses})`
+      );
+    } catch (e) {
+      const text = e.message + JSON.stringify(e.logs ?? []);
+      if (text.includes("ValidatorNotActivelyVoting") || text.includes("0x178d")) {
+        console.log(`  ↳ ${who}… is not voting — leaving its ${v.misses} miss(es) standing`);
+      } else if (text.includes("InsufficientValidatorStake") || text.includes("0x178c")
+                 || text.includes("StakeDeactivating") || text.includes("0x1792")) {
+        console.log(`  ↳ ${who}… stake no longer qualifies — leaving its misses standing`);
+      } else {
+        console.warn(`  ↳ ${who}… refresh failed: ${(e.message ?? "").slice(0, 90)}`);
+      }
+    }
+  }
+}
+
 function ixAdvanceRound(newRound) {
   const [cfg] = cfgPda(); const [pool] = poolPda(); const [wr] = wrapperPda(newRound);
   // H-2 fix: pass current round's WrapperRound so the program can verify it's aggregated.
@@ -378,6 +469,9 @@ async function runRound() {
   // ── Step 1: Complete current round (finalize EE + aggregate + distribute) ──
   // advance_round requires WrapperRound[currentRound].aggregated == true.
   // We finalize + aggregate the current EE round BEFORE advancing.
+  // Before anything else: make sure nobody is drifting towards deactivation.
+  await resetAccumulatedMisses();
+
   console.log(`[1] Completing current round ${currentRound} / EE ${thisEeId}`);
   const [curWrAddr] = wrapperPda(currentRound);
   const curWrAcct   = await conn.getAccountInfo(curWrAddr);

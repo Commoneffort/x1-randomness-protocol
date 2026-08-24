@@ -206,6 +206,36 @@ VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --refr
 
 **Hot-key-only mode — `init_ee_round` supported**: The Rust program accepts either the cold identity key OR the hot key (`x1_randomness_authority`) as the coordinator signer for `init_ee_round`. Daemons in hot-key-only mode use the hot key as coordinator — the EE round PDA is seeded by the signer key, but the `val-reg` account lookup still uses the cold identity (PDA seed `["val-reg", identity]`). All validators can open rounds regardless of whether they run in full or hot-key-only mode.
 
+## ⚠ NEVER BUILD A GENERAL `mark_validator_missed` CRANK
+
+`reveal_via_ee` does **not** reset `consecutive_misses`, despite the field being
+documented as "reset to 0 on successful reveal". The only resets in the deployed
+program are `register_validator` and `refresh_validator_status`. Misses are
+therefore **cumulative for the lifetime of a registration**.
+
+`EE_V4_N_CONTRIBUTORS` (7) is smaller than the active validator set, so commit
+slots fill first-come and a *different* validator is shut out of every round.
+A crank that called `mark_validator_missed` across the registry would give each
+excluded validator a permanent miss, the exclusion would rotate, and **every
+validator would hit `VALIDATOR_MAX_CONSECUTIVE_MISSES` (5) and deactivate in
+roughly forty rounds — a few days.** This has never happened only because no
+such crank exists. Do not write one.
+
+Calling it on a *single* named dead validator is safe and is the only
+permissionless way to evict a node whose operator is unreachable
+(`deregister_validator` takes `identity: Signer`, so it is self-only).
+
+**Mitigation in place:** `run-round.js` runs `resetAccumulatedMisses()` every
+crank cycle (throttled to 5 min). It scans the registry and calls the
+permissionless `refresh_validator_status` on any validator with
+`consecutive_misses > 0`, which resets the counter — but only succeeds if that
+validator's vote is live and its stake still qualifies, so a genuinely dead node
+stays evictable. Since a validator can gain at most one miss per round (the
+miss-record PDA is seeded by round *and* identity) and rounds are hours apart,
+five can never be reached while any crank is running. **This is a keeper-side
+guard, not a fix — it holds only while a crank is up.** The real fix is a
+program change to reset the counter in `reveal_via_ee`.
+
 ## Security constraints (added V2.2 — do not remove)
 
 - **`ee_v4_program`** — all four CPI instructions enforce `address = ENTROPY_ENGINE_V4`. Cannot pass a fake program.

@@ -4,7 +4,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { useX1Wallet, useConnection } from "@/lib/X1WalletContext";
 import { PublicKey, Transaction, TransactionInstruction, SystemProgram } from "@solana/web3.js";
 import { ProtocolClient, ValidatorReveal, FeeEscrow, ValidatorRegistration } from "@/lib/protocol";
-import { PROGRAM_ID, EE_V4_STAKE_LAMPORTS, FEE_VALIDATORS_PCT, DISC, ACCT_DISC, MIN_VALIDATOR_STAKE_XNT, VALIDATOR_MAX_INACTIVE_SLOTS, MIN_COMMITTEE_SIZE, VALIDATOR_MAX_CONSECUTIVE_MISSES, EE_V4_N_CONTRIBUTORS, EE_V4_M_THRESHOLD, ROUND_STATS_BASELINE_ROUND } from "@/lib/constants";
+import { PROGRAM_ID, EE_V4_STAKE_LAMPORTS, FEE_VALIDATORS_PCT, DISC, ACCT_DISC, MIN_VALIDATOR_STAKE_XNT, VALIDATOR_MAX_INACTIVE_SLOTS, MIN_COMMITTEE_SIZE, VALIDATOR_MAX_CONSECUTIVE_MISSES, EE_V4_N_CONTRIBUTORS, EE_V4_M_THRESHOLD, ROUND_STATS_BASELINE_ROUND, STALENESS_HARD_LIMIT_SLOTS } from "@/lib/constants";
 import { findFeeEscrowPda, findValRegPda } from "@/lib/pdas";
 
 export default function ValidatorsPage() {
@@ -194,12 +194,25 @@ export default function ValidatorsPage() {
     return `${Math.floor(secs / 3600)}h ago`;
   };
 
-  // One full round cycle: commit window (200) + reveal (400) + binding slot (675) + overhead ≈ 1400 slots.
-  // If a validator's last commit is more than 2 round cycles before the last aggregation,
-  // they missed at least one recent round even if the protocol was active.
-  // This fires regardless of active flag — consecutive_misses stays 0 until mark_validator_missed
-  // is implemented, so active===true alone is not a reliable liveness signal.
+  // How long one EE round *takes*: commit window (200) + reveal (400) + binding
+  // slot (675) + overhead ≈ 1400 slots.
   const ROUND_CYCLE_SLOTS = 1400;
+  // How often a round actually *happens*, which is a completely different number
+  // and is the one this check needs.
+  //
+  // The V4.3 idle gate means a new round is only opened when the entropy pool
+  // goes stale (STALENESS_HARD_LIMIT_SLOTS) or a request is queued — so in a
+  // quiet period rounds are ~21 600 slots apart, roughly 2¼ hours, not 1400
+  // slots apart. This check used `ROUND_CYCLE_SLOTS * 2` as its threshold,
+  // which is ~18 minutes, so *any* validator that sat out a single round was
+  // flagged "not committing" for the entire ~2 hours until the next one.
+  //
+  // That is not a fault: EE_V4_N_CONTRIBUTORS is 7 and there are more active
+  // validators than that, so the commit slots fill on a first-come basis and
+  // exactly (active − n) validators are shut out every round, rotating. One
+  // missed round is the system working. Two in a row is worth flagging.
+  const ROUND_INTERVAL_SLOTS = STALENESS_HARD_LIMIT_SLOTS;
+  const MISSED_ROUNDS_BEFORE_FLAG = 2;
   // A validator silent for ~1 day of slots is treated as offline — a long-dead node
   // that never deregistered (deregister is self-only, so it cannot be removed for them).
   // These are hidden from the registry table below and excluded from the Active count,
@@ -209,7 +222,11 @@ export default function ValidatorsPage() {
     if (!v.active) return "inactive";
     if (lastAggregatedSlot > 0 && lastAggregatedSlot - v.lastActiveSlot > OFFLINE_SLOTS)
       return "offline";
-    if (lastAggregatedSlot > 0 && lastAggregatedSlot - v.lastActiveSlot > ROUND_CYCLE_SLOTS * 2)
+    if (
+      lastAggregatedSlot > 0 &&
+      lastAggregatedSlot - v.lastActiveSlot >
+        ROUND_CYCLE_SLOTS + ROUND_INTERVAL_SLOTS * MISSED_ROUNDS_BEFORE_FLAG
+    )
       return "not-committing";
     return "active";
   };
