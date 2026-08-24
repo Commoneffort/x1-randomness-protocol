@@ -55,24 +55,23 @@ pub const PREMIUM_REQUEST_FEE_LAMPORTS: u64 = 50_000_000; // 0.05 XNT
 pub const COMMIT_SELECTION_THRESHOLD: u64 = u64::MAX;
 /// Number of commit slots per EE V4 round.
 ///
-/// Lowered 7 → 6 on 2026-08-24. With 8 validators actually running, n=7 left a
-/// tolerance of exactly one: a single outage and the remaining 7 filled the round
-/// exactly, a second and `commit_count` never reached n, so the round could not
-/// leave CommitPhase and had to be cancelled. Rounds 407331–407336 all filled
-/// 7/7 with nothing spare. n=6 restores a tolerance of two.
+/// n=7 with 8 validators running means a tolerance of exactly one: a single
+/// outage still fills the round (rounds 407331–407336 each filled 7/7 with
+/// nothing spare), a second leaves `commit_count` short of n, so the round never
+/// leaves CommitPhase and must be cancelled. Lowering n to 6 would restore a
+/// tolerance of two; that is deliberately *not* done — the committee size is held
+/// at 7 and liveness headroom is to come from adding validators instead.
 ///
-/// The cost is that (active − n) validators are excluded from each round. That is
-/// routine, not a fault, and must never be recorded as one — see
-/// `mark_validator_missed`, which refuses to mark a validator that was not in the
-/// committee.
+/// The consequence is that (active − n) validators are excluded from each round,
+/// rotating. That is routine, not a fault, and must never be recorded as one —
+/// see `mark_validator_missed`, which refuses to mark a validator that was not in
+/// the committee.
 ///
-/// Keep n at least two below the number of validators reliably running, and never
-/// above MAX_COMMITTEE_SIZE (10) — the size of EE V4's ContributorEntry array.
-pub const EE_V4_N_CONTRIBUTORS: u8 = 6;
+/// Never set above MAX_COMMITTEE_SIZE (10) — the size of EE V4's ContributorEntry
+/// array — and never below EE_V4_M_THRESHOLD.
+pub const EE_V4_N_CONTRIBUTORS: u8 = 7;
 /// Reveal threshold — minimum reveals required to finalise the EE round.
-/// Unchanged at 5: m=5 of n=6 still survives one non-reveal after the commit
-/// phase, and buying liveness by lowering a reveal threshold is the one trade
-/// this protocol does not make.
+/// m=5 of n=7 means the round survives up to 2 non-reveals after the commit phase.
 pub const EE_V4_M_THRESHOLD: u8 = 5;
 
 // Verified on-chain layout constants (X1/Solana, confirmed against live accounts):
