@@ -56,7 +56,41 @@ solana program deploy \
 - **RPC:** `https://rpc.mainnet.x1.xyz`
 - **EE V4:** `FDyWtM9UBNfXNuc5oZJ1V86d3dz635WnqMfX8x5Uifbm`
 
-Each program upgrade costs approximately 1.25–1.5 XNT from the payer wallet. Check balance before upgrading (`solana balance ~/.config/solana/x1randomness-key.json --url https://rpc.mainnet.x1.xyz`).
+An upgrade **net** costs well under 0.1 XNT, but `solana program deploy` first
+stages the whole `.so` in a buffer account and needs that rent *available* up
+front — **~5.03 XNT for a 721 KB program** — refunded when the buffer is closed
+at the end of the deploy. Budget for the buffer, not the net. Check the balance
+first (`solana balance ~/.config/solana/x1randomness-key.json --url https://rpc.mainnet.x1.xyz`);
+the deploy aborts if it is short. Measured 2026-08-24: 6.106 → 6.040 XNT
+across a full upgrade cycle (net 0.066).
+
+### V4.7.1 — deployed 2026-08-24, slot 73906137
+
+**No coordination required. Validators need to do nothing.** Program-only change:
+no account layout changed, no instruction account list changed, so every running
+`validator-daemon.js` keeps working untouched across the upgrade.
+
+`mark_validator_missed` now proves a miss from the EE round's own contributor
+table instead of from the absence of the `ValidatorReveal` PDA. This closes the
+remote DoS described under "NEVER BUILD A GENERAL `mark_validator_missed` CRANK"
+below — `claim_validator_reward` closes that PDA, so claiming a reward used to
+convert an honest round into markable evidence of a miss.
+
+Verified by simulation against the deployed program (validator `8byEUEZ2…`):
+
+| EE round | in committee | revealed | reveal PDA | result |
+|---|---|---|---|---|
+| 407330 | yes | yes | closed by claim | rejected `0x1774` Unauthorized |
+| 407331 | no (n=7 < 8 active) | — | absent | rejected `0x1793` NotSelectedForRound |
+| 399967 | yes | no | absent | **markable** — genuine miss preserved |
+
+The third row is the point: a genuinely dead node is still evictable, so
+`mark_validator_missed` remains usable for its one legitimate purpose.
+
+`EE_V4_N_CONTRIBUTORS` stays 7 and `EE_V4_M_THRESHOLD` stays 5.
+
+Deployed bytes verified byte-identical to `target/deploy/randomness_wrapper.so`
+(sha256 `5e4248a0…`) by `solana program dump`.
 
 ### V4.7 post-upgrade sequence (2026-05-29)
 
