@@ -221,6 +221,26 @@ validator would hit `VALIDATOR_MAX_CONSECUTIVE_MISSES` (5) and deactivate in
 roughly forty rounds — a few days.** This has never happened only because no
 such crank exists. Do not write one.
 
+### It is worse than an internal footgun — it is a remote DoS
+
+`mark_validator_missed` is an on-chain instruction on a permissionless program.
+**Nothing about the attack requires this repository.** Anyone who knows the
+program ID can derive the discriminator and call it.
+
+And it does not take forty rounds. `claim_validator_reward` closes the
+`ValidatorReveal` PDA (`close = contributor`), while `mark_validator_missed`
+proves a miss only by checking `expected_reveal_pda.lamports() == 0`. So **once
+a validator claims its reward, the proof that it revealed is destroyed and that
+round becomes retroactively markable as a miss.** Claiming is automatic in
+`validator-daemon.js` (`sweepUnclaimedRewards`), so nearly every historical
+round qualifies.
+
+Measured on mainnet 2026-08-24: 2 795 finalized EE rounds available as
+ammunition, `miss_record` rent 0.000954 XNT, so **0.0048 XNT deactivates one
+validator and 0.043 XNT deactivates the entire set**, in a single burst of ~45
+transactions. Verified concretely: round 407330, `8byEUEZ2…` was a contributor
+and revealed, yet is markable because it has claimed.
+
 Calling it on a *single* named dead validator is safe and is the only
 permissionless way to evict a node whose operator is unreachable
 (`deregister_validator` takes `identity: Signer`, so it is self-only).
@@ -232,9 +252,19 @@ permissionless `refresh_validator_status` on any validator with
 validator's vote is live and its stake still qualifies, so a genuinely dead node
 stays evictable. Since a validator can gain at most one miss per round (the
 miss-record PDA is seeded by round *and* identity) and rounds are hours apart,
-five can never be reached while any crank is running. **This is a keeper-side
-guard, not a fix — it holds only while a crank is up.** The real fix is a
-program change to reset the counter in `reveal_via_ee`.
+five can never be reached *from ordinary round exclusion* while any crank is
+running. The guard is adaptive: it backs off to 5 minutes while every counter
+reads zero and re-checks every cycle as soon as one does not.
+
+**This is a keeper-side guard, not a fix.** It holds only while a crank is up,
+and against a deliberate attacker it bounds the damage to one crank cycle of
+downtime per burst rather than preventing it. The real fix needs a program
+change, and there are two parts to it:
+
+1. reset `consecutive_misses` in `reveal_via_ee` (stops accumulation), and
+2. stop `claim_validator_reward` closing the `ValidatorReveal` PDA, or have
+   `mark_validator_missed` prove absence some other way — otherwise claiming a
+   reward permanently converts an honest round into markable evidence of a miss.
 
 ## Security constraints (added V2.2 — do not remove)
 

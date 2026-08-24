@@ -214,11 +214,18 @@ function ixRefreshValidatorStatus(identity, voteAccount, stakeAccount) {
  * so no transaction is sent. The registry scan is throttled because it is a
  * getProgramAccounts and the public RPC rate-limits.
  */
-const MISS_GUARD_INTERVAL_MS = 5 * 60 * 1000;
-let missGuardLastRun = 0;
+// Adaptive: cheap when quiet, immediate when something is marking validators.
+// A registry scan is a getProgramAccounts and the public RPC rate-limits, so it
+// backs off to 5 minutes while every counter reads zero — but the moment a miss
+// appears it re-checks on every crank cycle until the registry is clean again,
+// because an attacker can re-mark as fast as they can pay.
+const MISS_GUARD_IDLE_MS  = 5 * 60 * 1000;
+const MISS_GUARD_ALERT_MS = 0;
+let missGuardLastRun  = 0;
+let missGuardInterval = MISS_GUARD_IDLE_MS;
 
 async function resetAccumulatedMisses() {
-  if (Date.now() - missGuardLastRun < MISS_GUARD_INTERVAL_MS) return;
+  if (Date.now() - missGuardLastRun < missGuardInterval) return;
   missGuardLastRun = Date.now();
 
   let regs;
@@ -240,8 +247,13 @@ async function resetAccumulatedMisses() {
     }))
     .filter(v => v.misses > 0);
 
-  if (climbing.length === 0) return;
+  if (climbing.length === 0) {
+    missGuardInterval = MISS_GUARD_IDLE_MS;
+    return;
+  }
 
+  // Something is marking validators. Stay on every cycle until it stops.
+  missGuardInterval = MISS_GUARD_ALERT_MS;
   console.log(`  [guard] ${climbing.length} validator(s) with misses > 0 — resetting`);
   for (const v of climbing) {
     const who = v.identity.toBase58().slice(0, 8);
