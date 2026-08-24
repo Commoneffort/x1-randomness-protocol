@@ -16,10 +16,28 @@ IDL generation fails with an `anchor-syn` compile error (proc-macro API). This i
 
 If `Cargo.lock` is regenerated for any reason, immediately re-pin:
 
+`Cargo.lock` is **not tracked**, so every clean build re-resolves and picks up
+whatever has been published since. `cargo-build-sbf` bundles rustc **1.84.1**,
+which cannot parse `edition2024` manifests, so the resolution has to be walked
+back by hand. The `--precise` selector names the version *currently in the lock*,
+not the one you want — `-p proc-macro-crate@3.5.0 --precise 3.2.0`, not
+`-p "proc-macro-crate@3.2.0"`, which silently matches nothing.
+
+Working set as of 2026-08-24 (apply in this order — `proc-macro-crate` first,
+because it drags `toml_edit` → `indexmap` → `hashbrown` up with it):
+
 ```bash
-cargo update -p "proc-macro-crate@3.2.0" --precise 3.2.0
-cargo update -p blake3 --precise 1.7.0
+cargo update -p blake3 --precise 1.7.0                          # else digest 0.11 → block-buffer 0.12
+cargo update -p proc-macro-crate@3.5.0 --precise 3.2.0          # else toml_edit 0.25 → indexmap ^2.13
+cargo update -p indexmap@2.14.0 --precise 2.7.1                 # else hashbrown 0.17
+cargo update -p unicode-segmentation@1.13.2 --precise 1.12.0    # requires rustc 1.85
 ```
+
+Each failure names its own offender (`requires rustc 1.85.0`, or `feature
+edition2024 is required`), so if a new one appears, pin it the same way and add
+it here. A successful build prints `Compiling randomness-wrapper` then
+`Finished \`release\` profile`; the `anchor-syn`/`source_file` error *after*
+that is the IDL step and is expected — see above.
 
 Failure to re-pin causes edition2024 compile errors that have nothing to do with the program logic.
 

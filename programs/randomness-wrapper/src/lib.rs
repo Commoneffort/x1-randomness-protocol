@@ -53,13 +53,26 @@ pub const PREMIUM_REQUEST_FEE_LAMPORTS: u64 = 50_000_000; // 0.05 XNT
 /// while the validator set is small). Lower this as the set grows to cap committee
 /// size probabilistically — e.g. u64::MAX/10*7 targets ~70% eligibility.
 pub const COMMIT_SELECTION_THRESHOLD: u64 = u64::MAX;
-/// Number of commit slots per EE V4 round. With 9 registered validators and n=7,
-/// 7 validators fill the commit slots each round; the remaining 2 may miss but
-/// VALIDATOR_MAX_CONSECUTIVE_MISSES=5 gives enough buffer before deactivation.
-/// Raise n as the validator set grows beyond ~12 to maintain round diversity.
-pub const EE_V4_N_CONTRIBUTORS: u8 = 7;
+/// Number of commit slots per EE V4 round.
+///
+/// Lowered 7 → 6 on 2026-08-24. With 8 validators actually running, n=7 left a
+/// tolerance of exactly one: a single outage and the remaining 7 filled the round
+/// exactly, a second and `commit_count` never reached n, so the round could not
+/// leave CommitPhase and had to be cancelled. Rounds 407331–407336 all filled
+/// 7/7 with nothing spare. n=6 restores a tolerance of two.
+///
+/// The cost is that (active − n) validators are excluded from each round. That is
+/// routine, not a fault, and must never be recorded as one — see
+/// `mark_validator_missed`, which refuses to mark a validator that was not in the
+/// committee.
+///
+/// Keep n at least two below the number of validators reliably running, and never
+/// above MAX_COMMITTEE_SIZE (10) — the size of EE V4's ContributorEntry array.
+pub const EE_V4_N_CONTRIBUTORS: u8 = 6;
 /// Reveal threshold — minimum reveals required to finalise the EE round.
-/// m=5 of n=7 means the round survives up to 2 non-reveals after the commit phase.
+/// Unchanged at 5: m=5 of n=6 still survives one non-reveal after the commit
+/// phase, and buying liveness by lowering a reveal threshold is the one trade
+/// this protocol does not make.
 pub const EE_V4_M_THRESHOLD: u8 = 5;
 
 // Verified on-chain layout constants (X1/Solana, confirmed against live accounts):
@@ -81,6 +94,24 @@ pub const VOTE_V4_BLS_SOME_EXTRA: usize = 48; // added when bls = Some
 pub const VOTE_STATE_V3: u32 = 2;
 pub const VOTE_STATE_V4: u32 = 3;
 pub const MAX_LOCKOUT_HISTORY: usize = 64; // sanity cap on decoded vote count (tower holds <=31)
+// EE V4 Round contributor table. `contributors: [ContributorEntry; 10]` starts at
+// offset 158; each entry is 68 bytes:
+//   pubkey[0..32] | commitment[32..64] | revealed u8[64] | 3 bytes reserved
+// `commit_count` (offset 74) says how many entries are populated.
+//
+// Verified against 263 live rounds with 0 < reveal_count < commit_count: the number
+// of entries with revealed == 1 equals reveal_count in every one, and the flagged
+// positions vary between rounds (0111111, 1111110, 1011111), so this is a genuine
+// per-contributor flag rather than an artefact of the count.
+//
+// This table is the protocol's permanent, authoritative record of who committed and
+// who revealed. Unlike the ValidatorReveal PDA it is never closed, which is the
+// whole reason `mark_validator_missed` proves absence from here.
+pub const EE_CONTRIBUTORS_OFFSET: usize = 158;
+pub const EE_CONTRIBUTOR_ENTRY_SIZE: usize = 68;
+pub const EE_CONTRIBUTOR_REVEALED_OFFSET: usize = 64;
+pub const EE_COMMIT_COUNT_OFFSET: usize = 74;
+
 pub const STAKE_TAG_OFFSET: usize = 0;
 pub const STAKE_VOTER_PUBKEY_OFFSET: usize = 124;
 pub const STAKE_LAMPORTS_OFFSET: usize = 156;
@@ -1650,10 +1681,67 @@ pub mod randomness_wrapper {
         );
 
         // Verify the expected ValidatorReveal PDA does NOT exist (no lamports = not created).
+        // Kept as a cheap first filter: if the PDA is still there they certainly
+        // revealed. Its *absence*, however, proves nothing — see below.
         require!(
             ctx.accounts.expected_reveal_pda.lamports() == 0,
             RandomnessError::Unauthorized // PDA exists → they did reveal, not a miss
         );
+
+        // A miss is "committed and then failed to reveal" — nothing else.
+        //
+        // This used to rest entirely on the check above, and that was a remote
+        // denial-of-service on the whole validator set. `claim_validator_reward`
+        // closes the ValidatorReveal PDA (`close = contributor`), so the moment a
+        // validator collected a reward it destroyed the only evidence that it had
+        // revealed, and that round became permanently markable against it. Since
+        // the daemon claims automatically, nearly every past round qualified: with
+        // 2 795 finalized rounds on chain and miss-record rent at 0.000954 XNT,
+        // anyone could deactivate a validator for 0.005 XNT and the entire
+        // registry for 0.043 XNT, in one burst, using rounds those validators had
+        // completed correctly.
+        //
+        // The EE round's own contributor table is the durable record and is never
+        // closed, so absence is proved from there instead:
+        //
+        //   not in the table          → never in the committee. With n < the active
+        //                               set, exclusion is routine and is NOT a miss.
+        //   in the table, revealed=1  → did the work. Not a miss, whatever became
+        //                               of the PDA.
+        //   in the table, revealed=0  → committed and did not reveal. A real miss.
+        {
+            let reg = &ctx.accounts.validator_registration;
+            let commit_count = ee_data[EE_COMMIT_COUNT_OFFSET] as usize;
+            require!(
+                commit_count <= MAX_COMMITTEE_SIZE as usize,
+                RandomnessError::InvalidEeV4RoundResult
+            );
+            let table_end = EE_CONTRIBUTORS_OFFSET
+                .checked_add(commit_count.checked_mul(EE_CONTRIBUTOR_ENTRY_SIZE)
+                    .ok_or(error!(RandomnessError::InvalidEeV4RoundResult))?)
+                .ok_or(error!(RandomnessError::InvalidEeV4RoundResult))?;
+            require!(ee_data.len() >= table_end, RandomnessError::InvalidEeV4RoundResult);
+
+            let mut committed = false;
+            let mut revealed  = false;
+            for i in 0..commit_count {
+                let base = EE_CONTRIBUTORS_OFFSET + i * EE_CONTRIBUTOR_ENTRY_SIZE;
+                let who = Pubkey::from(
+                    <[u8; 32]>::try_from(&ee_data[base..base + 32])
+                        .map_err(|_| error!(RandomnessError::InvalidEeV4RoundResult))?
+                );
+                // Either key may appear: the hot key signs commits today, and rounds
+                // from before the V4.6 rotation carry the identity.
+                if who == reg.x1_randomness_authority || who == reg.identity {
+                    committed = true;
+                    revealed  = ee_data[base + EE_CONTRIBUTOR_REVEALED_OFFSET] == 1;
+                    break;
+                }
+            }
+
+            require!(committed, RandomnessError::NotSelectedForRound);
+            require!(!revealed, RandomnessError::Unauthorized);
+        }
 
         ctx.accounts.miss_record.bump = ctx.bumps.miss_record;
 
@@ -1673,7 +1761,8 @@ pub mod randomness_wrapper {
 
     /// Initialize an EE V4 round via CPI.
     /// Only registered active validators may open a round.
-    /// n_contributors = MIN_EE_M_THRESHOLD so the round fills as soon as the quorum commits.
+    /// n_contributors = EE_V4_N_CONTRIBUTORS and m_threshold = EE_V4_M_THRESHOLD;
+    /// both are protocol constants, never caller-supplied.
     pub fn init_ee_round(
         ctx: Context<InitEeRound>,
         ee_round_id: u64,

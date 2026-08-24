@@ -496,7 +496,9 @@ async function runOnce() {
       }
       throw initErr;
     }
-    console.log(`  ✓ n=7, m=5, binding_slot=current+675 (derived on-chain)`);
+    // n/m/binding_slot are protocol constants read by the program, not by us —
+    // don't print numbers here that a redeploy can silently make wrong.
+    console.log(`  ✓ EE round ${eeV4RoundId} opened (n/m/binding_slot derived on-chain)`);
     // Commit immediately — don't wait for the next poll; the 200-slot window (~75s)
     // can expire before the next iteration, especially if getProgramAccounts is slow.
     const firstSecrets = { secret: crypto.randomBytes(32), nonce: crypto.randomBytes(32) };
@@ -717,7 +719,7 @@ async function runOnce() {
             }
             throw initErr;
           }
-          console.log(`  ✓ EE round ${nextEeId} opened — n=7, m=5, binding_slot=current+675`);
+          console.log(`  ✓ EE round ${nextEeId} opened (n/m/binding_slot derived on-chain)`);
           // Commit immediately — don't return and wait for the next poll, the
           // 200-slot commit window (~75s) can expire before the daemon polls again.
           const freshSecrets = { secret: crypto.randomBytes(32), nonce: crypto.randomBytes(32) };
