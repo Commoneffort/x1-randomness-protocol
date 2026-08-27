@@ -97,7 +97,11 @@ VALIDATOR_KEYPAIR=~/.config/solana/identity.json \
 nohup node keeper/validator-daemon.js --loop > /tmp/validator-daemon.log 2>&1 &
 ```
 
-Prefer a systemd unit or pm2 over `nohup` so the daemon survives a reboot.
+Prefer a systemd unit or pm2 over `nohup` so the daemon survives a reboot. If
+you already run one, restart it with `sudo systemctl restart <unit>` rather than
+killing the process — a supervised daemon will simply be restarted from the old
+code path otherwise. On the reference node the units are
+`x1randomness-validator` and `x1randomness-crank`.
 
 ### Environment variables
 
@@ -192,10 +196,24 @@ are scheduled in advance and always follow the same order:
    cd x1-randomness-protocol
    git pull
    cd keeper && npm install && cd ..
-   pkill -f validator-daemon.js
-   # then re-run your usual start command from "Running the daemon" above
+   git rev-parse --short HEAD          # must match the announced commit
    ```
-   Confirm you are on the announced commit: `git rev-parse --short HEAD`.
+   Then restart the daemon so it loads the new file. **If you run it under
+   systemd** (check with `systemctl status x1randomness-validator`):
+   ```bash
+   sudo systemctl restart x1randomness-validator
+   ```
+   **If you started it by hand**, kill it by PID and re-run your usual start
+   command from "Running the daemon" above:
+   ```bash
+   pgrep -af 'node .*validator-daemon\.js'   # find the PID
+   kill <pid>
+   ```
+
+   > **Do not use `pkill -f validator-daemon.js`.** The `-f` flag matches against
+   > full command lines, including the shell command you are typing it in, so it
+   > kills your own session before the daemon — and on a systemd node it fights
+   > the supervisor, which restarts the daemon underneath you anyway.
 3. **Deploy happens after everyone confirms.** The upgrade authority deploys and
    posts the deploy slot.
 
