@@ -96,8 +96,14 @@ function requestPda(requester, seed) {
   return findPda([Buffer.from("request"), requester.toBuffer(), seed]);
 }
 function receiptPda(requestId) { return findPda([Buffer.from("receipt"), requestId]); }
-function validatorRevealPda(eeRound, contributor) {
-  return findPda([Buffer.from("validator-reveal"), eeRound.toBuffer(), contributor.toBuffer()]);
+// V4.7+: the ValidatorReveal PDA is seeded by x1_randomness_authority (the hot
+// key), NOT by the raw signer, so mark_validator_missed can derive it. Pass the
+// authority read from the registration, not contributor.publicKey.
+function validatorRevealPda(eeRound, authority) {
+  return findPda([Buffer.from("validator-reveal"), eeRound.toBuffer(), authority.toBuffer()]);
+}
+function validatorRegPda(identity) {
+  return findPda([Buffer.from("val-reg"), identity.toBuffer()]);
 }
 function eeRoundPda(coordinator, roundId) {
   return PublicKey.findProgramAddressSync(
@@ -261,12 +267,18 @@ function buildRequestRandomness(requester, seed, callbackProgram, callbackIx, cu
   });
 }
 
-function buildInitEeRound(coordinator, eeRoundId) {
+// `protocolRound` is protocol_config.current_round — the fee escrow is seeded by it.
+// `reg` comes from loadValidatorReg(); when the payer is not a registered validator
+// its vote/stake are unknown, so the coordinator key is passed and the handler
+// rejects the call, which is the correct outcome rather than a malformed tx.
+function buildInitEeRound(coordinator, eeRoundId, protocolRound, reg) {
   const [configPda]       = protocolConfigPda();
   const [wrPda]           = wrapperRoundPda(eeRoundId);
   const [eeRound]         = eeRoundPda(coordinator.publicKey, eeRoundId);
-  // coordinator_reg PDA — may not exist if coordinator is not a registered validator
-  const [coordinatorReg]  = findPda([Buffer.from("val-reg"), coordinator.publicKey.toBuffer()]);
+  const [coordinatorReg]  = validatorRegPda(coordinator.publicKey);
+  const [escrowPda]       = feeEscrowPda(protocolRound);
+  const vote  = reg && reg.ok ? reg.vote  : coordinator.publicKey;
+  const stake = reg && reg.ok ? reg.stake : coordinator.publicKey;
   // n, m, binding_slot are all derived on-chain — only eeRoundId is passed
   const data = Buffer.concat([
     disc("init_ee_round"),
@@ -280,9 +292,9 @@ function buildInitEeRound(coordinator, eeRoundId) {
       { pubkey: eeRound,                isSigner: false, isWritable: true  },
       { pubkey: coordinator.publicKey,  isSigner: true,  isWritable: true  },
       { pubkey: coordinatorReg,         isSigner: false, isWritable: false },
-      // coordinator_vote and coordinator_stake are checked in handler; pass payer as dummy
-      { pubkey: coordinator.publicKey,  isSigner: false, isWritable: false },
-      { pubkey: coordinator.publicKey,  isSigner: false, isWritable: false },
+      { pubkey: vote,                   isSigner: false, isWritable: false }, // coordinator_vote
+      { pubkey: stake,                  isSigner: false, isWritable: false }, // coordinator_stake
+      { pubkey: escrowPda,              isSigner: false, isWritable: true  }, // fee_escrow (V4.7)
       { pubkey: SystemProgram.programId,isSigner: false, isWritable: false },
       { pubkey: EE_V4,                  isSigner: false, isWritable: false },
     ],
@@ -290,17 +302,23 @@ function buildInitEeRound(coordinator, eeRoundId) {
   }), eeRound, wrPda };
 }
 
-function buildCommitViaEe(contributor, eeRoundId, commitment, eeRound) {
+// `reg` is the object returned by loadValidatorReg().
+function buildCommitViaEe(contributor, eeRoundId, commitment, eeRound, reg) {
   const [configPda]  = protocolConfigPda();
+  const [poolPda]    = entropyPoolPda();
   const [wrPda]      = wrapperRoundPda(eeRoundId);
   const data = Buffer.concat([disc("commit_via_ee"), commitment]);
   return new TransactionInstruction({
     programId: PROGRAM_ID,
     keys: [
       { pubkey: configPda,               isSigner: false, isWritable: false },
+      { pubkey: poolPda,                 isSigner: false, isWritable: false }, // entropy_pool: seeds selection
       { pubkey: wrPda,                   isSigner: false, isWritable: false },
-      { pubkey: eeRound,                 isSigner: false, isWritable: true },
-      { pubkey: contributor.publicKey,   isSigner: true,  isWritable: true },
+      { pubkey: eeRound,                 isSigner: false, isWritable: true  },
+      { pubkey: contributor.publicKey,   isSigner: true,  isWritable: true  },
+      { pubkey: reg.pda,                 isSigner: false, isWritable: true  }, // validator_reg (mut: last_active_slot)
+      { pubkey: reg.vote,                isSigner: false, isWritable: false }, // vote_account: liveness checked in handler
+      { pubkey: reg.stake,               isSigner: false, isWritable: false }, // stake_account: stake checked in handler
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       { pubkey: EE_V4,                   isSigner: false, isWritable: false },
     ],
@@ -308,19 +326,22 @@ function buildCommitViaEe(contributor, eeRoundId, commitment, eeRound) {
   });
 }
 
-function buildRevealViaEe(contributor, eeRoundId, secret, nonce, eeRound) {
+function buildRevealViaEe(contributor, eeRoundId, secret, nonce, eeRound, reg) {
   const [configPda] = protocolConfigPda();
   const [wrPda]     = wrapperRoundPda(eeRoundId);
-  const [vrPda]     = validatorRevealPda(eeRound, contributor.publicKey);
+  const [vrPda]     = validatorRevealPda(eeRound, reg.authority);
   const data = Buffer.concat([disc("reveal_via_ee"), secret, nonce]);
   return { ix: new TransactionInstruction({
     programId: PROGRAM_ID,
     keys: [
       { pubkey: configPda,               isSigner: false, isWritable: false },
       { pubkey: wrPda,                   isSigner: false, isWritable: false },
-      { pubkey: eeRound,                 isSigner: false, isWritable: true },
-      { pubkey: vrPda,                   isSigner: false, isWritable: true },   // ValidatorReveal init
-      { pubkey: contributor.publicKey,   isSigner: true,  isWritable: true },
+      { pubkey: eeRound,                 isSigner: false, isWritable: true  },
+      { pubkey: vrPda,                   isSigner: false, isWritable: true  },  // ValidatorReveal init
+      { pubkey: contributor.publicKey,   isSigner: true,  isWritable: true  },
+      // V4.8 writes consecutive_misses/last_round_participated/last_active_slot
+      // here. Writable is also accepted by pre-V4.8 programs, which only read it.
+      { pubkey: reg.pda,                 isSigner: false, isWritable: true  },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       { pubkey: EE_V4,                   isSigner: false, isWritable: false },
     ],
@@ -485,6 +506,29 @@ async function readAccount(pubkey) {
   const info = await conn.getAccountInfo(pubkey, "confirmed");
   if (!info) return null;
   return info.data;
+}
+
+// Reads the caller's ValidatorRegistration. commit_via_ee and reveal_via_ee both
+// need the real vote and stake accounts (verified in the handler) and the hot key
+// that seeds the ValidatorReveal PDA — none of which can be guessed, so they are
+// read from the registration itself. Returns ok:false when the payer cannot take
+// part, which the EE section reports as a skip rather than a cryptic on-chain error.
+async function loadValidatorReg(identity) {
+  const [pda] = validatorRegPda(identity);
+  const d = await readAccount(pda);
+  if (!d) return { pda, ok: false, why: `no ValidatorRegistration at ${pda.toBase58()} — payer is not a registered validator` };
+  if (d.length < 171) return { pda, ok: false, why: `registration is ${d.length} bytes, expected >= 171 (pre-V4.6 account — run migrate-v46.js)` };
+  if (d[137] !== 1) return { pda, ok: false, why: "validator registration is inactive" };
+  const authority = new PublicKey(d.subarray(139, 171));
+  if (!authority.equals(identity)) {
+    return { pda, ok: false, why: `x1_randomness_authority is ${authority.toBase58()}, not the payer — reveal_via_ee requires that key to sign` };
+  }
+  return {
+    pda, ok: true,
+    vote:      new PublicKey(d.subarray(40, 72)),
+    stake:     new PublicKey(d.subarray(72, 104)),
+    authority,
+  };
 }
 
 function readU64(data, offset) {
@@ -734,6 +778,14 @@ async function main() {
   }
 
   // ── 10. Init EE Round via CPI ────────────────────────────────────────────────
+  // init_ee_round, commit_via_ee and reveal_via_ee all need the payer's
+  // registration: its vote and stake accounts are verified on chain, and its
+  // x1_randomness_authority seeds the ValidatorReveal PDA.
+  const validatorReg = await loadValidatorReg(payer.publicKey);
+  if (!validatorReg.ok) {
+    console.log(`\n  note: EE round tests need a registered validator — ${validatorReg.why}`);
+  }
+
   const eeRoundId = Date.now() % 1000000; // unique-ish round ID
   let eeRoundAddr = null;
   let wrPdaAddr   = null;
@@ -742,14 +794,14 @@ async function main() {
   let finalBindingSlot = 0;
   await test("10. Init EE round via CPI to Entropy Engine V4", async () => {
     // EE V4 has a minimum binding slot offset — probe via doubling until accepted
-    const { ix: _ix, eeRound, wrPda } = buildInitEeRound(payer, eeRoundId); // just to get PDAs
+    const { ix: _ix, eeRound, wrPda } = buildInitEeRound(payer, eeRoundId, currentRound, validatorReg); // just to get PDAs
     eeRoundAddr = eeRound;
     wrPdaAddr = wrPda;
 
     for (let offset = 300; offset <= 20000; offset = Math.ceil(offset * 1.5)) {
       const slot = await conn.getSlot("confirmed");
       const bindingSlot = slot + offset;
-      const { ix } = buildInitEeRound(payer, eeRoundId);
+      const { ix } = buildInitEeRound(payer, eeRoundId, currentRound, validatorReg);
       try {
         await sendIx(ix, [payer], `InitEeRound (id=${eeRoundId})`);
         finalBindingSlot = bindingSlot;
@@ -779,7 +831,12 @@ async function main() {
   let secret = null;
   let nonce  = null;
 
-  if (eeRoundInit) {
+  if (!validatorReg.ok && eeRoundInit) {
+    skip("11. Commit via EE", validatorReg.why);
+    skip("12. Reveal via EE", validatorReg.why);
+  }
+
+  if (eeRoundInit && validatorReg.ok) {
     secret = crypto.randomBytes(32);
     nonce  = crypto.randomBytes(32);
     const commitment = crypto.createHash("sha256")
@@ -787,7 +844,7 @@ async function main() {
       .digest();
 
     await test("11. Commit to EE V4 round via wrapper CPI", async () => {
-      const ix = buildCommitViaEe(payer, eeRoundId, commitment, eeRoundAddr);
+      const ix = buildCommitViaEe(payer, eeRoundId, commitment, eeRoundAddr, validatorReg);
       await sendIx(ix, [payer], `CommitViaEE (round ${eeRoundId})`);
       console.log(`  commitment: ${commitment.toString("hex").slice(0, 16)}...`);
     });
@@ -795,7 +852,7 @@ async function main() {
     // ── 12. Reveal via EE ──────────────────────────────────────────────────────
     let validatorRevealPdaAddr = null;
     await test("12. Reveal to EE V4 round via wrapper CPI (creates ValidatorReveal PDA)", async () => {
-      const { ix, vrPda } = buildRevealViaEe(payer, eeRoundId, secret, nonce, eeRoundAddr);
+      const { ix, vrPda } = buildRevealViaEe(payer, eeRoundId, secret, nonce, eeRoundAddr, validatorReg);
       validatorRevealPdaAddr = vrPda;
       await sendIx(ix, [payer], `RevealViaEE (round ${eeRoundId})`);
       console.log(`  secret: ${secret.toString("hex").slice(0, 16)}...`);
