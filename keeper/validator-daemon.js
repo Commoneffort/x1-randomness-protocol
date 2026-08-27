@@ -317,7 +317,7 @@ function ixReveal(eeRoundId, eeRound, secret, nonce) {
       { pubkey: eeRound,                 isSigner: false, isWritable: true  },
       { pubkey: vr,                      isSigner: false, isWritable: true  },
       { pubkey: hotKey.publicKey,        isSigner: true,  isWritable: true  }, // contributor = x1_randomness_authority
-      { pubkey: reg,                     isSigner: false, isWritable: false }, // validator_reg: enforces contributor == x1_randomness_authority
+      { pubkey: reg,                     isSigner: false, isWritable: true  }, // validator_reg: enforces contributor == x1_randomness_authority; V4.8 writes consecutive_misses/last_active_slot
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       { pubkey: EE_V4,                   isSigner: false, isWritable: false },
     ],

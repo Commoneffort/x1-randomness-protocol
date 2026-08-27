@@ -768,6 +768,7 @@ pub struct RevealViaEe<'info> {
     /// Contributor's registration — enforces that contributor == x1_randomness_authority,
     /// keeping the ValidatorReveal PDA address consistent with mark_validator_missed.
     #[account(
+        mut,
         seeds = [b"val-reg", validator_reg.identity.as_ref()],
         bump = validator_reg.bump,
         constraint = validator_reg.active @ RandomnessError::ValidatorInactive,
@@ -2055,6 +2056,21 @@ pub mod randomness_wrapper {
         vr.protocol_round = ctx.accounts.protocol_config.current_round;
         vr.claimed = false;
         vr.bump = ctx.bumps.validator_reveal;
+
+        // V4.8: a completed reveal is the only honest evidence of liveness, so it
+        // is what clears the miss counter. Before this, `consecutive_misses` was
+        // reset only by register_validator and refresh_validator_status, so misses
+        // accumulated for the life of a registration — a validator that missed one
+        // round, then revealed correctly for months, was still one step closer to
+        // deactivation with nothing having gone wrong in between. The counter is
+        // supposed to mean "misses in a row, right now", and only this path can
+        // truthfully say the run has ended.
+        let ee_round_id  = ctx.accounts.protocol_config.ee_v4_round_id;
+        let current_slot = Clock::get()?.slot;
+        let reg = &mut ctx.accounts.validator_reg;
+        reg.consecutive_misses      = 0;
+        reg.last_round_participated = ee_round_id;
+        reg.last_active_slot        = current_slot;
 
         Ok(())
     }

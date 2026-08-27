@@ -216,8 +216,13 @@ in between, and your bond for any round you commit to but cannot reveal.
 Today misses only ever accumulate over the life of a registration, and are
 cleared only by `register_validator` or `refresh_validator_status`. This is a
 Kind B upgrade: `validator_reg` becomes writable in `reveal_via_ee`, so daemons
-must be updated before the deploy. See `docs/V4.8-SPEC.md`. **Not yet
-scheduled — no action required until announced.**
+must be updated before the deploy. See `docs/V4.8-SPEC.md`.
+
+**Status: announced. Pull and restart now.** The updated daemon runs correctly
+against the program that is deployed today, so you can do this at any time and
+nothing breaks while the rest of the set catches up. Reply with your
+`git rev-parse --short HEAD`; the deploy happens once every active validator has
+confirmed.
 
 ---
 
