@@ -180,11 +180,14 @@ function ixRefreshValidatorStatus(identity, voteAccount, stakeAccount) {
  * This exists to make one specific failure impossible: **the whole validator
  * set being deactivated by misses accumulated over time.**
  *
- * The on-chain state machine has a gap. `mark_validator_missed` increments
- * `consecutive_misses` and deactivates a validator at
- * VALIDATOR_MAX_CONSECUTIVE_MISSES (5), but `reveal_via_ee` does *not* reset
- * the counter on a successful reveal, even though the field is documented to.
- * The only resets are `register_validator` and `refresh_validator_status`.
+ * V4.8 (slot 76974985) closed the gap this was written for: `reveal_via_ee` now
+ * resets `consecutive_misses`, so a validator that reveals clears its own
+ * counter and misses are no longer cumulative for the life of a registration.
+ *
+ * This guard is kept as a backstop. It still covers counters accrued before
+ * V4.8, and validators whose reveals are failing for some unrelated reason —
+ * exactly the nodes that would otherwise drift toward
+ * VALIDATOR_MAX_CONSECUTIVE_MISSES (5) without anyone noticing.
  *
  * That matters because EE_V4_N_CONTRIBUTORS (7) is smaller than the active
  * set, so the commit slots fill first-come and a different validator is shut

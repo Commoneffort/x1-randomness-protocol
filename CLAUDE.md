@@ -72,6 +72,18 @@ first (`solana balance ~/.config/solana/x1randomness-key.json --url https://rpc.
 the deploy aborts if it is short. Measured 2026-08-24: 6.106 → 6.040 XNT
 across a full upgrade cycle (net 0.066).
 
+### V4.8 — deployed slot 76974985
+
+**Coordinated upgrade.** `reveal_via_ee` resets `consecutive_misses` and stamps
+`last_round_participated` / `last_active_slot`. `validator_reg` became `mut`, so
+daemons had to pass it writable *before* the deploy — see `docs/V4.8-SPEC.md`
+for the ordering argument and `VALIDATORS.md` for the operator steps.
+
+No account layout change and no migration: all three fields already existed in
+the 171-byte `ValidatorRegistration`.
+
+Deploy sig: `4xUDZpzBTCCnpZ1FEJq1DMS2to2QV1F5H3E4zTKaABaCoxrCVtW26oL3SiNGBbsRwj7rVq8RTBBEB1nfJPPLqdLt`
+
 ### V4.7.1 — deployed 2026-08-24, slot 73906137
 
 **No coordination required. Validators need to do nothing.** Program-only change:
@@ -268,10 +280,12 @@ VALIDATOR_KEYPAIR=~/.config/solana/identity.json node validator-daemon.js --refr
 
 ## ⚠ NEVER BUILD A GENERAL `mark_validator_missed` CRANK
 
-`reveal_via_ee` does **not** reset `consecutive_misses`, despite the field being
-documented as "reset to 0 on successful reveal". The only resets in the deployed
-program are `register_validator` and `refresh_validator_status`. Misses are
-therefore **cumulative for the lifetime of a registration**.
+**Resolved in V4.8 (slot 76974985) — kept because the reasoning still governs
+`mark_validator_missed`, and because a crank across the registry is still a bad
+idea.** `reveal_via_ee` now resets `consecutive_misses`, so misses are no longer
+cumulative for the lifetime of a registration: any validator that reveals clears
+its own counter. What follows describes the hazard as it stood before that, and
+why the eviction path is shaped the way it is.
 
 `EE_V4_N_CONTRIBUTORS` (7) is smaller than the active validator set, so commit
 slots fill first-come and a *different* validator is shut out of every round.
@@ -321,10 +335,16 @@ and against a deliberate attacker it bounds the damage to one crank cycle of
 downtime per burst rather than preventing it. The real fix needs a program
 change, and there are two parts to it:
 
-1. reset `consecutive_misses` in `reveal_via_ee` (stops accumulation), and
-2. stop `claim_validator_reward` closing the `ValidatorReveal` PDA, or have
-   `mark_validator_missed` prove absence some other way — otherwise claiming a
-   reward permanently converts an honest round into markable evidence of a miss.
+1. ~~reset `consecutive_misses` in `reveal_via_ee`~~ — **done in V4.8**
+   (slot 76974985).
+2. ~~stop `claim_validator_reward` closing the `ValidatorReveal` PDA, or have
+   `mark_validator_missed` prove absence some other way~~ — **done in V4.7.1**,
+   which proves a miss from the EE round's contributor table, so closing the PDA
+   is harmless.
+
+Both parts are now shipped. `resetAccumulatedMisses()` stays in `run-round.js`
+as a backstop for counters accrued before V4.8 and for validators whose reveals
+fail for unrelated reasons; it is nearly free while every counter reads zero.
 
 ## Security constraints (added V2.2 — do not remove)
 
